@@ -1,3 +1,4 @@
+import { resolveAuthOrigin, safeAuthNext } from "@/utils/supabase/auth-origin";
 import { NextRequest, NextResponse } from "next/server";
 
 import {
@@ -5,40 +6,6 @@ import {
   SUPERADMIN_REQUIRED_ERROR_MESSAGE,
 } from "@/utils/supabase/superadmin";
 import { createClient } from "@/utils/supabase/server";
-
-const FALLBACK_SITE_URL = "http://localhost:3005";
-
-const getConfiguredSiteOrigin = () => {
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-  if (!siteUrl) {
-    return null;
-  }
-
-  try {
-    return new URL(siteUrl).origin;
-  } catch {
-    return null;
-  }
-};
-
-const getRequestOrigin = (request: NextRequest) => {
-  const configuredSiteOrigin = getConfiguredSiteOrigin();
-  if (configuredSiteOrigin) {
-    return configuredSiteOrigin;
-  }
-
-  const forwardedHost =
-    request.headers.get("x-forwarded-host") ?? request.headers.get("host");
-  const forwardedProto =
-    request.headers.get("x-forwarded-proto") ??
-    (forwardedHost?.includes("localhost") ? "http" : "https");
-
-  if (forwardedHost) {
-    return `${forwardedProto}://${forwardedHost}`;
-  }
-
-  return FALLBACK_SITE_URL;
-};
 
 const buildLoginRedirect = (origin: string, error: string) => {
   const url = new URL("/login", origin);
@@ -48,10 +15,10 @@ const buildLoginRedirect = (origin: string, error: string) => {
 
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url);
-  const redirectOrigin = getRequestOrigin(request);
+  const redirectOrigin = resolveAuthOrigin(request.headers.get("host") ?? request.nextUrl.host);
   const code = requestUrl.searchParams.get("code");
   const next = requestUrl.searchParams.get("next");
-  const safeNext = next?.startsWith("/") ? next : "/";
+  const safeNext = safeAuthNext(next, redirectOrigin);
 
   if (!code) {
     return NextResponse.redirect(

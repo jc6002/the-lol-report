@@ -1,43 +1,15 @@
 "use server";
 
+import { resolveAuthOrigin } from "@/utils/supabase/auth-origin";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { getMissingAuthEnvVars } from "@/utils/supabase/env";
 import { createClient } from "@/utils/supabase/server";
 
-const FALLBACK_SITE_URL = "http://localhost:3005";
-
-const getConfiguredSiteOrigin = () => {
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-  if (!siteUrl) {
-    return null;
-  }
-
-  try {
-    return new URL(siteUrl).origin;
-  } catch {
-    return null;
-  }
-};
-
 const getOrigin = async () => {
-  const configuredSiteOrigin = getConfiguredSiteOrigin();
-  if (configuredSiteOrigin) {
-    return configuredSiteOrigin;
-  }
-
   const headersList = await headers();
-  const host = headersList.get("x-forwarded-host") ?? headersList.get("host");
-  const protocol =
-    headersList.get("x-forwarded-proto") ??
-    (host?.includes("localhost") ? "http" : "https");
-
-  if (host) {
-    return `${protocol}://${host}`;
-  }
-
-  return FALLBACK_SITE_URL;
+  return resolveAuthOrigin(headersList.get("host"));
 };
 
 export const signInWithGoogleAction = async () => {

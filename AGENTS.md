@@ -79,7 +79,7 @@ npm run lint
 ## Setup and commands
 - Required env vars in `.env.local`: `NEXT_PUBLIC_SUPABASE_URL`, either `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` or `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `NEXT_PUBLIC_GOOGLE_CLIENT_ID`; `NEXT_PUBLIC_SITE_URL` can be used for callback origin fallback.
 - Google OAuth/Supabase redirect allowlists must include the deployed callback URLs (`https://stats.humorstudy.org/auth/callback`, `https://stats.slightlyhumorous.org/auth/callback`) plus the local callback URL for whichever dev port is used.
-- OAuth callback redirects must prefer `NEXT_PUBLIC_SITE_URL` over request-derived origins because Amplify SSR can expose internal localhost origins in route handlers.
+- OAuth start and callback must both use `resolveAuthOrigin`: verified Vercel deployment/production/branch hosts take precedence so snapshot PKCE cookies stay on the same host; Amplify retains `NEXT_PUBLIC_SITE_URL` because SSR can expose internal localhost origins. Every deployed snapshot callback must be allowed in Supabase.
 - Install/run: `npm install`, `npm run dev`; test: `npm test`; lint: `npm run lint`; build: `npm run build`.
 - AWS hosting uses the committed `amplify.yml` build spec plus console-managed Amplify GitHub App connections. Staging is `the-lol-report-staging` from the `staging` branch to `stats.slightlyhumorous.org`; production is `the-lol-report-production` from `main` to `stats.humorstudy.org`. Setup notes live in `README.md`.
 - Public routes: `/login` and `/auth/callback`; all others require an authenticated user whose matching `profiles` row has `is_superadmin = true`.
