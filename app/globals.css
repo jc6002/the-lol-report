@@ -560,59 +560,6 @@ body {
   }
 }
 
-label:has(> select.app-input) {
-  min-width: 0;
-  max-width: 100%;
-}
-
-select.app-input {
-  appearance: none;
-  -webkit-appearance: none;
-  cursor: pointer;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding-left: 0.75rem;
-  padding-right: 2.5rem;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23526277' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  background-position: right 0.85rem center;
-  background-repeat: no-repeat;
-  background-size: 1rem 1rem;
-}
-
-@media (max-width: 639px) {
-  div:has(> label > select.app-input),
-  label:has(> select.app-input) {
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-  }
-
-  select.app-input {
-    width: 100%;
-    min-width: 0;
-  }
-}
-
-select.app-input:disabled {
-  cursor: not-allowed;
-}
-
-html.dark select.app-input {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23b7c8db' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-}
-
-select.app-input option {
-  background-color: #fffaf5;
-  color: #122033;
-}
-
-html.dark select.app-input option {
-  background-color: #0b1424;
-  color: #edf6ff;
-}
-
 @keyframes app-loading-spin {
   to {
     transform: rotate(360deg);

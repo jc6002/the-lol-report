@@ -4,6 +4,7 @@ import { ChevronRight, Search, X } from "lucide-react";
 import Link from "next/link";
 import { Fragment, useDeferredValue, useMemo, useState } from "react";
 
+import { AppSelect, type AppSelectOption } from "@/components/app-select";
 import { StudyAttributionCharts } from "@/components/study-attribution-charts";
 import type {
   AttributionLeaderboardRow,
@@ -158,6 +159,44 @@ const resolveStepPills = (
   }));
 };
 
+const syncAttributionUrlParams = (updates: {
+  groupBy?: AttributionGroupBy | null;
+  flavor?: string | null;
+  model?: string | null;
+}) => {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  if (updates.groupBy !== undefined) {
+    if (updates.groupBy && updates.groupBy !== "flavor") {
+      params.set("groupBy", updates.groupBy);
+    } else {
+      params.delete("groupBy");
+    }
+  }
+  if (updates.flavor !== undefined) {
+    if (updates.flavor) {
+      params.set("flavor", updates.flavor);
+    } else {
+      params.delete("flavor");
+    }
+  }
+  if (updates.model !== undefined) {
+    if (updates.model) {
+      params.set("model", updates.model);
+    } else {
+      params.delete("model");
+    }
+  }
+  const nextQuery = params.toString();
+  window.history.replaceState(
+    window.history.state,
+    "",
+    nextQuery
+      ? `${window.location.pathname}?${nextQuery}`
+      : window.location.pathname,
+  );
+};
+
 export function StudyAttributionLeaderboard({
   studyId,
   excludeHighRisk,
@@ -258,13 +297,18 @@ export function StudyAttributionLeaderboard({
       setSortBy("ciLow");
       setSortDirection("desc");
     }
-    if (
-      pinnedEntity &&
+    const clearingPinned =
+      pinnedEntity !== null &&
       ((nextGroup !== "flavor" && pinnedEntity.key.startsWith("flavor:")) ||
-        (nextGroup !== "model" && pinnedEntity.key.startsWith("model:")))
-    ) {
+        (nextGroup !== "model" && pinnedEntity.key.startsWith("model:")));
+    if (clearingPinned) {
       setPinnedEntity(null);
     }
+    syncAttributionUrlParams({
+      groupBy: nextGroup,
+      flavor: clearingPinned ? null : undefined,
+      model: clearingPinned ? null : undefined,
+    });
   };
 
   const handleSortClick = (column: LeaderboardSortKey) => {
@@ -316,6 +360,129 @@ export function StudyAttributionLeaderboard({
         : "Pipeline Signature";
 
   const excludeQuerySuffix = excludeHighRisk ? "&excludeHighRisk=1" : "";
+
+  const mobileSortOptions = useMemo<AppSelectOption<LeaderboardSortKey>[]>(() => {
+    const base: AppSelectOption<LeaderboardSortKey>[] = [
+      { value: "ciLow", label: "Positive rate (95% CI)" },
+    ];
+    if (showLiftColumn) {
+      base.push({ value: "meanLiftPp", label: "Same-image lift" });
+    }
+    base.push(
+      { value: "exposures", label: "Most exposures" },
+      { value: "captionCount", label: "Most captions" },
+      { value: "medianChainSeconds", label: "Fastest chain time" },
+      { value: "medianDwellMs", label: "Median dwell" },
+      { value: "label", label: `${primaryColumnLabel} (A–Z)` },
+    );
+    return base;
+  }, [primaryColumnLabel, showLiftColumn]);
+
+  const renderExpandedRowBody = (row: AttributionLeaderboardRow) => {
+    const stepPills = resolveStepPills(row);
+    const topCaptions = row.topCaptions ?? [];
+    const bottomCaptions = row.bottomCaptions ?? [];
+    const fullDescription =
+      row.description ??
+      row.subtitle ??
+      (row.isUnattributed ? "Captions without prompt chain lineage" : null);
+
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-slate-200/75 bg-white/45 p-3.5 sm:flex-row dark:border-slate-700/60 dark:bg-slate-950/30">
+          <div className="w-full min-w-0 space-y-2 sm:w-auto sm:flex-1">
+            {fullDescription ? (
+              <p className="max-w-4xl whitespace-pre-wrap break-words text-xs leading-5 text-foreground">
+                {fullDescription}
+              </p>
+            ) : (
+              <p className="app-muted text-xs">
+                No additional prompt description recorded.
+              </p>
+            )}
+
+            {stepPills.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1.5 pt-0.5 text-xs">
+                {stepPills.map((step, index) => (
+                  <Fragment
+                    key={`${step.stepOrder}-${step.modelName}-${index}`}
+                  >
+                    {index > 0 ? (
+                      <span aria-hidden="true" className="app-muted font-mono">
+                        →
+                      </span>
+                    ) : null}
+                    <span className="inline-flex items-center gap-1 rounded-md border border-slate-300/70 bg-white/70 px-2 py-0.5 font-mono text-[11px] text-foreground dark:border-slate-700/70 dark:bg-slate-900/70">
+                      <span className="app-muted">Step {step.stepOrder}:</span>
+                      <span className="font-semibold">{step.modelName}</span>
+                      {step.providerName ? (
+                        <span className="app-muted">({step.providerName})</span>
+                      ) : null}
+                    </span>
+                  </Fragment>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          {row.kind === "flavor" && row.flavorId !== null ? (
+            <Link
+              href={`/study/${studyId}/head-to-head?flavor=${row.flavorId}${excludeQuerySuffix}`}
+              className="app-button inline-flex h-8 shrink-0 items-center rounded-lg px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
+            >
+              {flavorCount >= 2
+                ? "Compare in Head-to-Head →"
+                : "Cross-study trajectory →"}
+            </Link>
+          ) : null}
+        </div>
+
+        {topCaptions.length > 0 ? (
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <p className="app-kicker text-xs font-semibold uppercase tracking-wide">
+                {row.exposures === 0
+                  ? `Staged captions (${topCaptions.length})`
+                  : bottomCaptions.length > 0
+                    ? `Highest-rated captions (${topCaptions.length})`
+                    : `Sample captions (${topCaptions.length})`}
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {topCaptions.map((sample) => (
+                  <DrilldownSampleCaptionCard
+                    key={`top-${sample.captionId}`}
+                    sample={sample}
+                    exposureUnitLabel={exposureUnitLabel}
+                    imageBroken={brokenCaptionImageIds.has(sample.captionId)}
+                    onImageError={markCaptionImageBroken}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {bottomCaptions.length > 0 ? (
+              <div className="space-y-2 pt-1">
+                <p className="app-kicker text-xs font-semibold uppercase tracking-wide">
+                  Lowest-rated captions ({bottomCaptions.length})
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {bottomCaptions.map((sample) => (
+                    <DrilldownSampleCaptionCard
+                      key={`low-${sample.captionId}`}
+                      sample={sample}
+                      exposureUnitLabel={exposureUnitLabel}
+                      imageBroken={brokenCaptionImageIds.has(sample.captionId)}
+                      onImageError={markCaptionImageBroken}
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-5">
@@ -379,25 +546,46 @@ export function StudyAttributionLeaderboard({
               })}
             </div>
 
-            <div className="relative w-full sm:w-56">
-              <Search
-                aria-hidden="true"
-                className="app-muted pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2"
-              />
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Filter rows..."
-                aria-label="Filter attribution rows"
-                className="app-input h-9 w-full rounded-lg pl-9 pr-3 text-sm outline-none"
-              />
+            <div className="flex w-full items-center gap-2 sm:w-auto">
+              <div className="relative min-w-0 flex-1 sm:w-56 sm:flex-none">
+                <Search
+                  aria-hidden="true"
+                  className="app-muted pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2"
+                />
+                <input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Filter rows..."
+                  aria-label="Filter attribution rows"
+                  className="app-input h-9 w-full rounded-lg pl-9 pr-3 text-sm outline-none"
+                />
+              </div>
+
+              <div className="shrink-0 md:hidden">
+                <AppSelect<LeaderboardSortKey>
+                  ariaLabel="Sort attribution rows"
+                  options={mobileSortOptions}
+                  value={sortBy}
+                  onValueChange={(nextColumn) => {
+                    setSortBy(nextColumn);
+                    setSortDirection(
+                      getDefaultLeaderboardSortDirection(nextColumn),
+                    );
+                  }}
+                  menuMinWidthPx={210}
+                  className="w-40 rounded-lg text-xs"
+                />
+              </div>
             </div>
 
             {pinnedEntity ? (
               <button
                 type="button"
-                onClick={() => setPinnedEntity(null)}
+                onClick={() => {
+                  setPinnedEntity(null);
+                  syncAttributionUrlParams({ flavor: null, model: null });
+                }}
                 className="inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg bg-sky-500/15 px-3 text-xs font-medium text-sky-900 ring-1 ring-sky-500/35 transition hover:bg-sky-500/22 dark:text-sky-100"
               >
                 <span>
@@ -413,7 +601,10 @@ export function StudyAttributionLeaderboard({
             {missingEntityNotice ? (
               <button
                 type="button"
-                onClick={() => setMissingEntityNotice(null)}
+                onClick={() => {
+                  setMissingEntityNotice(null);
+                  syncAttributionUrlParams({ flavor: null, model: null });
+                }}
                 className="inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg bg-amber-500/16 px-3 text-xs font-medium text-amber-900 ring-1 ring-amber-500/35 transition hover:bg-amber-500/24 dark:text-amber-100"
               >
                 <span>
@@ -441,6 +632,7 @@ export function StudyAttributionLeaderboard({
               onClick={() => {
                 setSearchQuery("");
                 setPinnedEntity(null);
+                syncAttributionUrlParams({ flavor: null, model: null });
               }}
               className="app-button inline-flex h-9 cursor-pointer items-center rounded-lg px-3 text-xs font-medium transition"
             >
@@ -448,493 +640,481 @@ export function StudyAttributionLeaderboard({
             </button>
           </div>
         ) : (
-          <div className="app-table-shell overflow-x-auto rounded-xl">
-            <table className="app-table min-w-full divide-y divide-slate-200/60 text-sm dark:divide-slate-700/60">
-              <thead>
-                <tr>
-                  <th
-                    scope="col"
-                    aria-sort={getAriaSort("label")}
-                    className="px-3.5 py-2.5 text-left text-xs font-semibold uppercase tracking-wide"
+          <>
+            {/* Mobile < md stacked cards (0px horizontal table scroll on 390x844) */}
+            <div className="space-y-2.5 md:hidden">
+              {visibleRows.map((row, index) => {
+                const isExpanded = expandedKeys.has(row.key);
+                const primaryDisplayLabel =
+                  row.kind === "pipeline" && row.pipelineSteps.length > 0
+                    ? row.pipelineSteps.join(" → ")
+                    : row.label;
+
+                return (
+                  <article
+                    key={`mobile-${row.key}`}
+                    className={`app-card overflow-hidden rounded-xl p-3.5 ${
+                      row.isUnattributed
+                        ? "border-t-2 border-slate-300/70 dark:border-slate-600/70"
+                        : ""
+                    }`}
                   >
                     <button
                       type="button"
-                      onClick={() => handleSortClick("label")}
-                      className="inline-flex min-h-7 cursor-pointer items-center gap-1 text-left transition hover:opacity-80"
+                      aria-expanded={isExpanded}
+                      onClick={() => toggleExpandedRow(row.key)}
+                      className="flex w-full min-w-0 items-start justify-between gap-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                     >
-                      <span>{primaryColumnLabel}</span>
-                      {sortBy === "label" ? (
-                        <SortDirectionArrow direction={sortDirection} />
-                      ) : null}
-                    </button>
-                  </th>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start gap-1.5">
+                          <ChevronRight
+                            aria-hidden="true"
+                            className={`mt-0.5 size-4 shrink-0 transition-transform ${
+                              isExpanded
+                                ? "rotate-90 text-foreground"
+                                : "app-muted"
+                            }`}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-baseline gap-1.5">
+                              {!row.isUnattributed ? (
+                                <span className="app-muted font-mono text-xs tabular-nums">
+                                  #{index + 1}
+                                </span>
+                              ) : null}
+                              <span
+                                className={`break-words text-sm font-semibold text-foreground ${
+                                  row.kind === "flavor" ||
+                                  row.kind === "pipeline"
+                                    ? "font-mono text-xs"
+                                    : ""
+                                }`}
+                              >
+                                {primaryDisplayLabel}
+                              </span>
+                            </div>
 
-                  <th
-                    scope="col"
-                    aria-sort={getAriaSort("captionCount")}
-                    className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSortClick("captionCount")}
-                      className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
-                    >
-                      <span>Captions</span>
-                      {sortBy === "captionCount" ? (
-                        <SortDirectionArrow direction={sortDirection} />
-                      ) : null}
-                    </button>
-                  </th>
+                            {row.kind === "flavor" && row.dominantModelLabel ? (
+                              <p className="app-muted mt-0.5 truncate text-xs">
+                                {row.dominantModelLabel}
+                                {row.stepCount
+                                  ? ` · ${row.stepCount}-step`
+                                  : ""}
+                              </p>
+                            ) : row.kind === "pipeline" ? (
+                              <p className="app-muted mt-0.5 text-xs tabular-nums">
+                                {row.flavorCount.toLocaleString()}{" "}
+                                {row.flavorCount === 1 ? "flavor" : "flavors"}
+                              </p>
+                            ) : null}
+                          </div>
+                        </div>
 
-                  <th
-                    scope="col"
-                    aria-sort={getAriaSort("exposures")}
-                    className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSortClick("exposures")}
-                      className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
-                    >
-                      <span>Exposures</span>
-                      {sortBy === "exposures" ? (
-                        <SortDirectionArrow direction={sortDirection} />
-                      ) : null}
-                    </button>
-                  </th>
+                        <p className="app-muted mt-1.5 pl-5 text-xs tabular-nums">
+                          {row.exposures.toLocaleString()} {exposureUnitLabel} ·{" "}
+                          {row.captionCount.toLocaleString()} caps
+                          {row.medianDwellMs !== null
+                            ? ` · ${formatDwellDurationLabel(row.medianDwellMs)} dwell`
+                            : ""}
+                          {row.medianChainSeconds !== null
+                            ? ` · ${formatChainSecondsLabel(row.medianChainSeconds)}`
+                            : ""}
+                        </p>
+                      </div>
 
-                  <th
-                    scope="col"
-                    aria-sort={getAriaSort("ciLow")}
-                    className="px-3.5 py-2.5 text-left text-xs font-semibold uppercase tracking-wide"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSortClick("ciLow")}
-                      className="inline-flex min-h-7 cursor-pointer items-center gap-1 text-left transition hover:opacity-80"
-                    >
-                      <span>Positive Rate &amp; 95% CI</span>
-                      {sortBy === "ciLow" ? (
-                        <SortDirectionArrow direction={sortDirection} />
-                      ) : null}
+                      <div className="shrink-0 text-right tabular-nums">
+                        {row.rate !== null &&
+                        row.ciLow !== null &&
+                        row.ciHigh !== null ? (
+                          <>
+                            <p className="text-sm font-semibold text-foreground">
+                              {formatRatePercent(row.rate)}
+                            </p>
+                            <p className="app-muted text-[11px]">
+                              [{formatRatePercent(row.ciLow)},{" "}
+                              {formatRatePercent(row.ciHigh)}]
+                            </p>
+                          </>
+                        ) : (
+                          <p className="app-muted text-xs">0 votes</p>
+                        )}
+                        {showLiftColumn &&
+                        row.sharedImageCount > 0 &&
+                        row.meanLiftPp !== null ? (
+                          <p
+                            className={`mt-0.5 text-xs font-semibold ${getLiftToneClassName(
+                              row.meanLiftPp,
+                            )}`}
+                          >
+                            {formatSignedLiftPp(row.meanLiftPp)} lift
+                          </p>
+                        ) : null}
+                      </div>
                     </button>
-                  </th>
 
-                  {showLiftColumn ? (
+                    {isExpanded ? (
+                      <div className="mt-3 border-t border-slate-200/70 pt-3 dark:border-slate-700/60">
+                        {renderExpandedRowBody(row)}
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+
+            {/* Desktop >= md sortable table */}
+            <div className="app-table-shell hidden overflow-x-auto rounded-xl md:block">
+              <table className="app-table min-w-full divide-y divide-slate-200/60 text-sm dark:divide-slate-700/60">
+                <thead>
+                  <tr>
                     <th
                       scope="col"
-                      aria-sort={getAriaSort("meanLiftPp")}
-                      className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
+                      aria-sort={getAriaSort("label")}
+                      className="px-3.5 py-2.5 text-left text-xs font-semibold uppercase tracking-wide"
                     >
                       <button
                         type="button"
-                        onClick={() => handleSortClick("meanLiftPp")}
-                        className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
+                        onClick={() => handleSortClick("label")}
+                        className="inline-flex min-h-7 cursor-pointer items-center gap-1 text-left transition hover:opacity-80"
                       >
-                        <span>Same-Image Lift</span>
-                        {sortBy === "meanLiftPp" ? (
+                        <span>{primaryColumnLabel}</span>
+                        {sortBy === "label" ? (
                           <SortDirectionArrow direction={sortDirection} />
                         ) : null}
                       </button>
                     </th>
-                  ) : null}
 
-                  <th
-                    scope="col"
-                    aria-sort={getAriaSort("medianChainSeconds")}
-                    className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSortClick("medianChainSeconds")}
-                      className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
+                    <th
+                      scope="col"
+                      aria-sort={getAriaSort("captionCount")}
+                      className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
                     >
-                      <span>Chain Time</span>
-                      {sortBy === "medianChainSeconds" ? (
-                        <SortDirectionArrow direction={sortDirection} />
-                      ) : null}
-                    </button>
-                  </th>
+                      <button
+                        type="button"
+                        onClick={() => handleSortClick("captionCount")}
+                        className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
+                      >
+                        <span>Captions</span>
+                        {sortBy === "captionCount" ? (
+                          <SortDirectionArrow direction={sortDirection} />
+                        ) : null}
+                      </button>
+                    </th>
 
-                  <th
-                    scope="col"
-                    aria-sort={getAriaSort("medianDwellMs")}
-                    className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSortClick("medianDwellMs")}
-                      className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
+                    <th
+                      scope="col"
+                      aria-sort={getAriaSort("exposures")}
+                      className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
                     >
-                      <span>Median Dwell</span>
-                      {sortBy === "medianDwellMs" ? (
-                        <SortDirectionArrow direction={sortDirection} />
-                      ) : null}
-                    </button>
-                  </th>
-                </tr>
-              </thead>
+                      <button
+                        type="button"
+                        onClick={() => handleSortClick("exposures")}
+                        className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
+                      >
+                        <span>Exposures</span>
+                        {sortBy === "exposures" ? (
+                          <SortDirectionArrow direction={sortDirection} />
+                        ) : null}
+                      </button>
+                    </th>
 
-              <tbody className="divide-y divide-slate-200/50 dark:divide-slate-800/70">
-                {visibleRows.map((row) => {
-                  const isExpanded = expandedKeys.has(row.key);
-                  const stepPills = resolveStepPills(row);
-                  const topCaptions = row.topCaptions ?? [];
-                  const bottomCaptions = row.bottomCaptions ?? [];
-                  const fullDescription =
-                    row.description ??
-                    row.subtitle ??
-                    (row.isUnattributed
-                      ? "Captions without prompt chain lineage"
-                      : null);
+                    <th
+                      scope="col"
+                      aria-sort={getAriaSort("ciLow")}
+                      className="px-3.5 py-2.5 text-left text-xs font-semibold uppercase tracking-wide"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleSortClick("ciLow")}
+                        className="inline-flex min-h-7 cursor-pointer items-center gap-1 text-left transition hover:opacity-80"
+                      >
+                        <span>Positive Rate &amp; 95% CI</span>
+                        {sortBy === "ciLow" ? (
+                          <SortDirectionArrow direction={sortDirection} />
+                        ) : null}
+                      </button>
+                    </th>
 
-                  const rowClassName = [
-                    row.isUnattributed
-                      ? "border-t-2 border-slate-300/70 dark:border-slate-600/70"
-                      : "",
-                    isExpanded ? "bg-sky-500/6 dark:bg-cyan-300/6" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ");
+                    {showLiftColumn ? (
+                      <th
+                        scope="col"
+                        aria-sort={getAriaSort("meanLiftPp")}
+                        className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleSortClick("meanLiftPp")}
+                          className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
+                        >
+                          <span>Same-Image Lift</span>
+                          {sortBy === "meanLiftPp" ? (
+                            <SortDirectionArrow direction={sortDirection} />
+                          ) : null}
+                        </button>
+                      </th>
+                    ) : null}
 
-                  const disclosureHint = isExpanded
-                    ? "Hide prompt & sample jokes"
-                    : row.exposures === 0
-                      ? "View prompt & staged jokes"
-                      : "View prompt & sample jokes";
+                    <th
+                      scope="col"
+                      aria-sort={getAriaSort("medianChainSeconds")}
+                      className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleSortClick("medianChainSeconds")}
+                        className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
+                      >
+                        <span>Chain Time</span>
+                        {sortBy === "medianChainSeconds" ? (
+                          <SortDirectionArrow direction={sortDirection} />
+                        ) : null}
+                      </button>
+                    </th>
 
-                  return (
-                    <Fragment key={row.key}>
-                      <tr className={rowClassName || undefined}>
-                        <td className="w-[calc(100vw-5.25rem)] min-w-52 max-w-[calc(100vw-5.25rem)] px-3.5 py-3 align-top sm:w-auto sm:min-w-72 sm:max-w-md">
-                          <button
-                            type="button"
-                            aria-expanded={isExpanded}
-                            onClick={() => toggleExpandedRow(row.key)}
-                            className="group flex w-full min-w-0 cursor-pointer items-start gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
-                          >
-                            <ChevronRight
-                              aria-hidden="true"
-                              className={`mt-0.5 size-4 shrink-0 transition-transform ${
-                                isExpanded
-                                  ? "rotate-90 text-foreground"
-                                  : "app-muted group-hover:text-foreground"
-                              }`}
-                            />
-                            <span className="block min-w-0 max-w-full flex-1 overflow-hidden">
-                              {row.kind === "flavor" ? (
-                                <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                                  <span className="break-words font-mono text-sm font-semibold text-foreground group-hover:underline">
-                                    {row.label}
-                                  </span>
-                                  {row.stepCount !== null && row.stepCount > 0 ? (
-                                    <span className="app-muted text-xs tabular-nums">
-                                      {row.stepCount}{" "}
-                                      {row.stepCount === 1 ? "step" : "steps"}
+                    <th
+                      scope="col"
+                      aria-sort={getAriaSort("medianDwellMs")}
+                      className="px-3.5 py-2.5 text-right text-xs font-semibold uppercase tracking-wide"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleSortClick("medianDwellMs")}
+                        className="inline-flex min-h-7 cursor-pointer items-center justify-end gap-1 transition hover:opacity-80"
+                      >
+                        <span>Median Dwell</span>
+                        {sortBy === "medianDwellMs" ? (
+                          <SortDirectionArrow direction={sortDirection} />
+                        ) : null}
+                      </button>
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody className="divide-y divide-slate-200/50 dark:divide-slate-800/70">
+                  {visibleRows.map((row) => {
+                    const isExpanded = expandedKeys.has(row.key);
+                    const rowClassName = [
+                      row.isUnattributed
+                        ? "border-t-2 border-slate-300/70 dark:border-slate-600/70"
+                        : "",
+                      isExpanded ? "bg-sky-500/6 dark:bg-cyan-300/6" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ");
+
+                    const disclosureHint = isExpanded
+                      ? "Hide prompt & sample jokes"
+                      : row.exposures === 0
+                        ? "View prompt & staged jokes"
+                        : "View prompt & sample jokes";
+
+                    return (
+                      <Fragment key={row.key}>
+                        <tr className={rowClassName || undefined}>
+                          <td className="min-w-72 max-w-md px-3.5 py-3 align-top">
+                            <button
+                              type="button"
+                              aria-expanded={isExpanded}
+                              onClick={() => toggleExpandedRow(row.key)}
+                              className="group flex w-full min-w-0 cursor-pointer items-start gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
+                            >
+                              <ChevronRight
+                                aria-hidden="true"
+                                className={`mt-0.5 size-4 shrink-0 transition-transform ${
+                                  isExpanded
+                                    ? "rotate-90 text-foreground"
+                                    : "app-muted group-hover:text-foreground"
+                                }`}
+                              />
+                              <span className="block min-w-0 max-w-full flex-1 overflow-hidden">
+                                {row.kind === "flavor" ? (
+                                  <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                                    <span className="break-words font-mono text-sm font-semibold text-foreground group-hover:underline">
+                                      {row.label}
                                     </span>
-                                  ) : null}
-                                </span>
-                              ) : row.kind === "pipeline" ? (
-                                <span className="block max-w-full truncate font-mono text-xs font-semibold text-foreground group-hover:underline sm:max-w-md">
-                                  {row.pipelineSteps.length > 0
-                                    ? row.pipelineSteps.join(" → ")
-                                    : row.label}
-                                </span>
-                              ) : (
-                                <span className="font-semibold text-foreground group-hover:underline">
-                                  {row.label}
-                                </span>
-                              )}
-
-                              {row.kind === "flavor" &&
-                              (row.subtitle || row.dominantModelLabel) ? (
-                                <span className="app-muted mt-0.5 block max-w-full truncate text-xs sm:max-w-md">
-                                  {[row.dominantModelLabel, row.subtitle]
-                                    .filter(Boolean)
-                                    .join(" · ")}
-                                </span>
-                              ) : row.kind === "model" && row.subtitle ? (
-                                <span className="app-muted mt-0.5 block max-w-full truncate font-mono text-xs sm:max-w-md">
-                                  {row.subtitle}
-                                </span>
-                              ) : row.kind === "pipeline" ? (
-                                <span className="app-muted mt-0.5 block text-xs tabular-nums">
-                                  {row.flavorCount.toLocaleString()}{" "}
-                                  {row.flavorCount === 1 ? "flavor" : "flavors"}
-                                </span>
-                              ) : row.isUnattributed ? (
-                                <span className="app-muted mt-0.5 block text-xs">
-                                  {row.subtitle ??
-                                    "Captions without prompt chain lineage"}
-                                </span>
-                              ) : null}
-
-                              <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs tabular-nums sm:hidden">
-                                {row.rate !== null ? (
-                                  <span className="font-semibold text-foreground">
-                                    {formatRatePercent(row.rate)} positive
+                                    {row.stepCount !== null &&
+                                    row.stepCount > 0 ? (
+                                      <span className="app-muted text-xs tabular-nums">
+                                        {row.stepCount}{" "}
+                                        {row.stepCount === 1 ? "step" : "steps"}
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                ) : row.kind === "pipeline" ? (
+                                  <span className="block max-w-md truncate font-mono text-xs font-semibold text-foreground group-hover:underline">
+                                    {row.pipelineSteps.length > 0
+                                      ? row.pipelineSteps.join(" → ")
+                                      : row.label}
                                   </span>
                                 ) : (
-                                  <span className="app-muted">
-                                    0 {exposureUnitLabel}
+                                  <span className="font-semibold text-foreground group-hover:underline">
+                                    {row.label}
                                   </span>
                                 )}
-                                {showLiftColumn &&
-                                row.sharedImageCount > 0 &&
-                                row.meanLiftPp !== null ? (
+
+                                {row.kind === "flavor" &&
+                                (row.subtitle || row.dominantModelLabel) ? (
+                                  <span className="app-muted mt-0.5 block max-w-md truncate text-xs">
+                                    {[row.dominantModelLabel, row.subtitle]
+                                      .filter(Boolean)
+                                      .join(" · ")}
+                                  </span>
+                                ) : row.kind === "model" && row.subtitle ? (
+                                  <span className="app-muted mt-0.5 block max-w-md truncate font-mono text-xs">
+                                    {row.subtitle}
+                                  </span>
+                                ) : row.kind === "pipeline" ? (
+                                  <span className="app-muted mt-0.5 block text-xs tabular-nums">
+                                    {row.flavorCount.toLocaleString()}{" "}
+                                    {row.flavorCount === 1
+                                      ? "flavor"
+                                      : "flavors"}
+                                  </span>
+                                ) : row.isUnattributed ? (
+                                  <span className="app-muted mt-0.5 block text-xs">
+                                    {row.subtitle ??
+                                      "Captions without prompt chain lineage"}
+                                  </span>
+                                ) : null}
+
+                                <span className="mt-1 block text-[11px] font-medium text-sky-800 dark:text-cyan-300">
+                                  {disclosureHint}
+                                </span>
+                              </span>
+                            </button>
+                          </td>
+
+                          <td className="whitespace-nowrap px-3.5 py-3 text-right align-top font-medium tabular-nums">
+                            {row.captionCount.toLocaleString()}
+                          </td>
+
+                          <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
+                            <span className="font-medium text-foreground">
+                              {row.exposures.toLocaleString()}
+                            </span>
+                            <span className="app-muted mt-0.5 block text-xs">
+                              {row.positive.toLocaleString()} positive
+                            </span>
+                          </td>
+
+                          <td className="px-3.5 py-3 align-top">
+                            {row.rate !== null &&
+                            row.ciLow !== null &&
+                            row.ciHigh !== null ? (
+                              <div className="flex min-w-60 items-center gap-3">
+                                <div className="relative h-2.5 w-28 shrink-0 rounded-full bg-slate-200/85 dark:bg-slate-800/90">
+                                  {studyPositiveRate !== null ? (
+                                    <span
+                                      aria-hidden="true"
+                                      className="absolute bottom-[-2px] top-[-2px] w-px bg-slate-500/70 dark:bg-slate-400/70"
+                                      style={{
+                                        left: `${Math.min(
+                                          100,
+                                          Math.max(0, studyPositiveRate * 100),
+                                        )}%`,
+                                      }}
+                                    />
+                                  ) : null}
+                                  <span
+                                    aria-hidden="true"
+                                    className="absolute inset-y-0 rounded-full bg-sky-500/35 dark:bg-cyan-400/30"
+                                    style={{
+                                      left: `${row.ciLow * 100}%`,
+                                      width: `${Math.max(
+                                        (row.ciHigh - row.ciLow) * 100,
+                                        1.5,
+                                      )}%`,
+                                    }}
+                                  />
+                                  <span
+                                    aria-hidden="true"
+                                    className="absolute bottom-0 top-0 w-1 -translate-x-1/2 rounded-full bg-teal-700 dark:bg-cyan-300"
+                                    style={{ left: `${row.rate * 100}%` }}
+                                  />
+                                </div>
+                                <span className="whitespace-nowrap tabular-nums">
+                                  <span className="font-semibold text-foreground">
+                                    {formatRatePercent(row.rate)}
+                                  </span>{" "}
+                                  <span className="app-muted text-xs">
+                                    [{formatRatePercent(row.ciLow)},{" "}
+                                    {formatRatePercent(row.ciHigh)}]
+                                  </span>
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="app-muted text-xs">
+                                — (0 {exposureUnitLabel})
+                              </span>
+                            )}
+                          </td>
+
+                          {showLiftColumn ? (
+                            <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
+                              {row.sharedImageCount > 0 &&
+                              row.meanLiftPp !== null ? (
+                                <div>
                                   <span
                                     className={`font-semibold ${getLiftToneClassName(
                                       row.meanLiftPp,
                                     )}`}
                                   >
-                                    · {formatSignedLiftPp(row.meanLiftPp)} lift
+                                    {formatSignedLiftPp(row.meanLiftPp)}
                                   </span>
-                                ) : null}
-                                <span className="app-muted">
-                                  · {row.exposures.toLocaleString()}{" "}
-                                  {exposureUnitLabel}
-                                </span>
-                              </span>
+                                  <span className="app-muted mt-0.5 block text-xs">
+                                    {row.sharedImageCount.toLocaleString()}{" "}
+                                    shared{" "}
+                                    {row.sharedImageCount === 1
+                                      ? "img"
+                                      : "imgs"}
+                                  </span>
+                                </div>
+                              ) : (
+                                <span className="app-muted">—</span>
+                              )}
+                            </td>
+                          ) : null}
 
-                              <span className="mt-1 block text-[11px] font-medium text-sky-800 dark:text-cyan-300">
-                                {disclosureHint}
-                              </span>
-                            </span>
-                          </button>
-                        </td>
-
-                        <td className="whitespace-nowrap px-3.5 py-3 text-right align-top font-medium tabular-nums">
-                          {row.captionCount.toLocaleString()}
-                        </td>
-
-                        <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
-                          <span className="font-medium text-foreground">
-                            {row.exposures.toLocaleString()}
-                          </span>
-                          <span className="app-muted mt-0.5 block text-xs">
-                            {row.positive.toLocaleString()} positive
-                          </span>
-                        </td>
-
-                        <td className="px-3.5 py-3 align-top">
-                          {row.rate !== null &&
-                          row.ciLow !== null &&
-                          row.ciHigh !== null ? (
-                            <div className="flex min-w-60 items-center gap-3">
-                              <div className="relative h-2.5 w-28 shrink-0 rounded-full bg-slate-200/85 dark:bg-slate-800/90">
-                                {studyPositiveRate !== null ? (
-                                  <span
-                                    aria-hidden="true"
-                                    className="absolute bottom-[-2px] top-[-2px] w-px bg-slate-500/70 dark:bg-slate-400/70"
-                                    style={{
-                                      left: `${Math.min(
-                                        100,
-                                        Math.max(0, studyPositiveRate * 100),
-                                      )}%`,
-                                    }}
-                                  />
-                                ) : null}
-                                <span
-                                  aria-hidden="true"
-                                  className="absolute inset-y-0 rounded-full bg-sky-500/35 dark:bg-cyan-400/30"
-                                  style={{
-                                    left: `${row.ciLow * 100}%`,
-                                    width: `${Math.max(
-                                      (row.ciHigh - row.ciLow) * 100,
-                                      1.5,
-                                    )}%`,
-                                  }}
-                                />
-                                <span
-                                  aria-hidden="true"
-                                  className="absolute bottom-0 top-0 w-1 -translate-x-1/2 rounded-full bg-teal-700 dark:bg-cyan-300"
-                                  style={{ left: `${row.rate * 100}%` }}
-                                />
-                              </div>
-                              <span className="whitespace-nowrap tabular-nums">
-                                <span className="font-semibold text-foreground">
-                                  {formatRatePercent(row.rate)}
-                                </span>{" "}
-                                <span className="app-muted text-xs">
-                                  [{formatRatePercent(row.ciLow)},{" "}
-                                  {formatRatePercent(row.ciHigh)}]
-                                </span>
-                              </span>
-                            </div>
-                          ) : (
-                            <span className="app-muted text-xs">
-                              — (0 {exposureUnitLabel})
-                            </span>
-                          )}
-                        </td>
-
-                        {showLiftColumn ? (
                           <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
-                            {row.sharedImageCount > 0 &&
-                            row.meanLiftPp !== null ? (
-                              <div>
-                                <span
-                                  className={`font-semibold ${getLiftToneClassName(
-                                    row.meanLiftPp,
-                                  )}`}
-                                >
-                                  {formatSignedLiftPp(row.meanLiftPp)}
-                                </span>
-                                <span className="app-muted mt-0.5 block text-xs">
-                                  {row.sharedImageCount.toLocaleString()} shared{" "}
-                                  {row.sharedImageCount === 1 ? "img" : "imgs"}
-                                </span>
-                              </div>
+                            {row.medianChainSeconds !== null ? (
+                              <span className="text-foreground">
+                                {formatChainSecondsLabel(
+                                  row.medianChainSeconds,
+                                )}
+                              </span>
                             ) : (
                               <span className="app-muted">—</span>
                             )}
                           </td>
-                        ) : null}
 
-                        <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
-                          {row.medianChainSeconds !== null ? (
-                            <span className="text-foreground">
-                              {formatChainSecondsLabel(row.medianChainSeconds)}
-                            </span>
-                          ) : (
-                            <span className="app-muted">—</span>
-                          )}
-                        </td>
-
-                        <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
-                          {row.medianDwellMs !== null ? (
-                            <span className="text-foreground">
-                              {formatDwellDurationLabel(row.medianDwellMs)}
-                            </span>
-                          ) : (
-                            <span className="app-muted">—</span>
-                          )}
-                        </td>
-                      </tr>
-
-                      {isExpanded ? (
-                        <tr className="bg-slate-500/4 dark:bg-slate-900/35">
-                          <td
-                            colSpan={totalColumnCount}
-                            className="px-4 py-4 align-top"
-                          >
-                            <div className="max-w-[calc(100vw-6rem)] space-y-4 sm:max-w-none">
-                              <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-slate-200/75 bg-white/45 p-3.5 sm:flex-row dark:border-slate-700/60 dark:bg-slate-950/30">
-                                <div className="w-full min-w-0 space-y-2 sm:w-auto sm:flex-1">
-                                  {fullDescription ? (
-                                    <p className="max-w-4xl whitespace-pre-wrap break-words text-xs leading-5 text-foreground">
-                                      {fullDescription}
-                                    </p>
-                                  ) : (
-                                    <p className="app-muted text-xs">
-                                      No additional prompt description recorded.
-                                    </p>
-                                  )}
-
-                                  {stepPills.length > 0 ? (
-                                    <div className="flex flex-wrap items-center gap-1.5 pt-0.5 text-xs">
-                                      {stepPills.map((step, index) => (
-                                        <Fragment
-                                          key={`${step.stepOrder}-${step.modelName}-${index}`}
-                                        >
-                                          {index > 0 ? (
-                                            <span
-                                              aria-hidden="true"
-                                              className="app-muted font-mono"
-                                            >
-                                              →
-                                            </span>
-                                          ) : null}
-                                          <span className="inline-flex items-center gap-1 rounded-md border border-slate-300/70 bg-white/70 px-2 py-0.5 font-mono text-[11px] text-foreground dark:border-slate-700/70 dark:bg-slate-900/70">
-                                            <span className="app-muted">
-                                              Step {step.stepOrder}:
-                                            </span>
-                                            <span className="font-semibold">
-                                              {step.modelName}
-                                            </span>
-                                            {step.providerName ? (
-                                              <span className="app-muted">
-                                                ({step.providerName})
-                                              </span>
-                                            ) : null}
-                                          </span>
-                                        </Fragment>
-                                      ))}
-                                    </div>
-                                  ) : null}
-                                </div>
-
-                                {row.kind === "flavor" &&
-                                row.flavorId !== null ? (
-                                  <Link
-                                    href={`/study/${studyId}/head-to-head?flavor=${row.flavorId}${excludeQuerySuffix}`}
-                                    className="app-button inline-flex h-8 shrink-0 items-center rounded-lg px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
-                                  >
-                                    {flavorCount >= 2
-                                      ? "Compare in Head-to-Head →"
-                                      : "Cross-study trajectory →"}
-                                  </Link>
-                                ) : null}
-                              </div>
-
-                              {topCaptions.length > 0 ? (
-                                <div className="space-y-3">
-                                  <div className="space-y-2">
-                                    <p className="app-kicker text-xs font-semibold uppercase tracking-wide">
-                                      {row.exposures === 0
-                                        ? `Staged captions (${topCaptions.length})`
-                                        : bottomCaptions.length > 0
-                                          ? `Highest-rated captions (${topCaptions.length})`
-                                          : `Sample captions (${topCaptions.length})`}
-                                    </p>
-                                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                                      {topCaptions.map((sample) => (
-                                        <DrilldownSampleCaptionCard
-                                          key={`top-${sample.captionId}`}
-                                          sample={sample}
-                                          exposureUnitLabel={exposureUnitLabel}
-                                          imageBroken={brokenCaptionImageIds.has(
-                                            sample.captionId,
-                                          )}
-                                          onImageError={markCaptionImageBroken}
-                                        />
-                                      ))}
-                                    </div>
-                                  </div>
-
-                                  {bottomCaptions.length > 0 ? (
-                                    <div className="space-y-2 pt-1">
-                                      <p className="app-kicker text-xs font-semibold uppercase tracking-wide">
-                                        Lowest-rated captions (
-                                        {bottomCaptions.length})
-                                      </p>
-                                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                                        {bottomCaptions.map((sample) => (
-                                          <DrilldownSampleCaptionCard
-                                            key={`low-${sample.captionId}`}
-                                            sample={sample}
-                                            exposureUnitLabel={exposureUnitLabel}
-                                            imageBroken={brokenCaptionImageIds.has(
-                                              sample.captionId,
-                                            )}
-                                            onImageError={markCaptionImageBroken}
-                                          />
-                                        ))}
-                                      </div>
-                                    </div>
-                                  ) : null}
-                                </div>
-                              ) : null}
-                            </div>
+                          <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
+                            {row.medianDwellMs !== null ? (
+                              <span className="text-foreground">
+                                {formatDwellDurationLabel(row.medianDwellMs)}
+                              </span>
+                            ) : (
+                              <span className="app-muted">—</span>
+                            )}
                           </td>
                         </tr>
-                      ) : null}
-                    </Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+
+                        {isExpanded ? (
+                          <tr className="bg-slate-500/4 dark:bg-slate-900/35">
+                            <td
+                              colSpan={totalColumnCount}
+                              className="px-4 py-4 align-top"
+                            >
+                              {renderExpandedRowBody(row)}
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
     </div>

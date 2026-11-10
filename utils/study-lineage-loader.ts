@@ -1,7 +1,12 @@
 import "server-only";
 
+import http from "node:http";
+import https from "node:https";
 import { cache } from "react";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  createClient as createSupabaseJsClient,
+  type SupabaseClient,
+} from "@supabase/supabase-js";
 
 import type { Database, Json, Tables } from "@/src/types/supabase";
 import {
@@ -28,7 +33,6 @@ import {
 import {
   adaptStudyExposures,
   buildStudyParticipationFunnel,
-  getSwipeEventMatchKey,
   NEW_STYLE_MIN_STUDY_ID,
   resolveStudyExposureMode,
   type AdaptedStudyExposures,
@@ -39,6 +43,7 @@ import {
   type StudyExposureMode,
   type StudyParticipationFunnel,
 } from "@/utils/study-exposure-adapter";
+import type { StudyVoteValue } from "@/utils/study-vote-events";
 import {
   chunkArray,
   DEFAULT_QUERY_CHUNK_SIZE,
@@ -53,12 +58,12 @@ import {
   type SupabaseCountResult,
   type SupabaseListResult,
 } from "@/utils/supabase-pagination";
+import { getSupabasePublicEnv } from "@/utils/supabase/env";
 import { createClient } from "@/utils/supabase/server";
 import { isSuperadminProfile } from "@/utils/supabase/superadmin";
 
 const MS_PER_MINUTE = 60_000;
-const ERA_PROBE_CONCURRENCY = 8;
-const TRAJECTORY_STUDY_CONCURRENCY = 6;
+const ERA_PROBE_CONCURRENCY = 4;
 const MAX_SEARCH_ITEMS_PER_GROUP = 6;
 export const STUDY_CACHE_MAX_ENTRIES = 16;
 export const TRAJECTORY_CACHE_MAX_ENTRIES = 64;
@@ -507,9 +512,7 @@ export function assembleCaptionLineageMap({
 
     if (rawChainRows.length > 0) {
       const orderedResponses = sortChainResponses(rawChainRows);
-      if (flavorStepCount === 0) {
-        flavorStepCount = orderedResponses.length;
-      }
+      flavorStepCount = orderedResponses.length;
       const terminalResponse = orderedResponses[orderedResponses.length - 1];
       terminalModel = modelsById.get(terminalResponse.llm_model_id);
 
@@ -613,6 +616,10 @@ const fetchAllStudyMappings = (
 ): Promise<RawStudyMappingRow[]> =>
   fetchAllRows<RawStudyMappingRow>({
     contextLabel: "study caption mappings",
+    countQuery: () =>
+      supabase
+        .from("study_caption_mappings")
+        .select("id", { count: "exact", head: true }),
     runQuery: (from, to) =>
       supabase
         .from("study_caption_mappings")
@@ -626,6 +633,10 @@ const fetchAllStudyParticipations = (
 ): Promise<RawStudyParticipationRow[]> =>
   fetchAllRows<RawStudyParticipationRow>({
     contextLabel: "study participations",
+    countQuery: () =>
+      supabase
+        .from("study_participations")
+        .select("profile_id", { count: "exact", head: true }),
     runQuery: (from, to) =>
       supabase
         .from("study_participations")
@@ -646,9 +657,30 @@ const probeTableHasRowForMappings = async (
   if (mappingIds.length === 0) {
     return false;
   }
+  const anchors = Array.from(
+    new Set([
+      mappingIds[0],
+      mappingIds[Math.floor(mappingIds.length / 2)],
+      mappingIds[mappingIds.length - 1],
+    ]),
+  );
+  const anchorHit = await fetchHasAnyRow<{ id: number }>({
+    contextLabel: table,
+    runQuery: () =>
+      supabase
+        .from(table)
+        .select("id")
+        .in("study_caption_mapping_id", anchors)
+        .limit(1) as PromiseLike<SupabaseListResult<{ id: number }>>,
+  });
+  if (anchorHit || mappingIds.length <= anchors.length) {
+    return anchorHit;
+  }
+  const anchorSet = new Set(anchors);
+  const rest = mappingIds.filter((id) => !anchorSet.has(id));
   const chunkSize = 120;
-  for (let i = 0; i < mappingIds.length; i += chunkSize) {
-    const chunk = mappingIds.slice(i, i + chunkSize);
+  for (let i = 0; i < rest.length; i += chunkSize) {
+    const chunk = rest.slice(i, i + chunkSize);
     const hasRow = await fetchHasAnyRow<{ id: number }>({
       contextLabel: table,
       runQuery: () =>
@@ -773,14 +805,19 @@ async function buildStudyCatalogEntries(
 export async function fetchTopNavbarMetadataWithClient(
   supabase: SupabaseClient<Database>,
   nowMs?: number,
+  preverified?: {
+    cacheNamespace: string | null;
+    studies: StudySummaryRow[];
+  },
 ): Promise<TopNavbarMetadata> {
   const effectiveNowMs = nowMs ?? Date.now();
-  const cacheNamespace =
-    await resolveVerifiedSuperadminCacheNamespace(supabase);
+  const cacheNamespace = preverified
+    ? preverified.cacheNamespace
+    : await resolveVerifiedSuperadminCacheNamespace(supabase);
 
   const loadMetadataUncached = async (): Promise<TopNavbarMetadata> => {
     const [studies, mappings, participations] = await Promise.all([
-      fetchStudiesList(supabase),
+      preverified ? Promise.resolve(preverified.studies) : fetchStudiesList(supabase),
       fetchAllStudyMappings(supabase),
       fetchAllStudyParticipations(supabase),
     ]);
@@ -1781,15 +1818,26 @@ type CachedStudyRawDataset = {
   computedFiltered?: CachedStudyComputedPayload;
 };
 
+type CachedReferenceDictionaries = {
+  flavors: readonly RawFlavorRow[];
+  flavorSteps: readonly RawFlavorStepRow[];
+  models: readonly RawModelRow[];
+  providers: readonly RawProviderRow[];
+  demographicQuestions: readonly RawDemographicQuestionRow[];
+  demographicAnswers: readonly RawDemographicAnswerRow[];
+  demographicMappings: readonly RawDemographicMappingRow[];
+};
+
 type StudyLineageCacheRegistry = {
   studyRawDatasetCache: BoundedSwrLru<CachedStudyRawDataset>;
   flavorTrajectoryCache: BoundedSwrLru<readonly FlavorCrossStudyPoint[]>;
   topNavbarMetadataCache: BoundedSwrLru<TopNavbarMetadata>;
   emptySearchResponseCache: BoundedSwrLru<StudySearchResponse>;
+  referenceDictionaryCache: BoundedSwrLru<CachedReferenceDictionaries>;
 };
 
 const STUDY_LINEAGE_CACHE_SYMBOL = Symbol.for(
-  "the-lol-report.studyLineageCacheRegistry.v3",
+  "the-lol-report.studyLineageCacheRegistry.v4",
 );
 
 const getStudyLineageCacheRegistry = (): StudyLineageCacheRegistry => {
@@ -1820,6 +1868,11 @@ const getStudyLineageCacheRegistry = (): StudyLineageCacheRegistry => {
         STUDY_CACHE_TTL_MS,
         STUDY_CACHE_MAX_STALE_MS,
       ),
+      referenceDictionaryCache: new BoundedSwrLru<CachedReferenceDictionaries>(
+        4,
+        STUDY_CACHE_TTL_MS,
+        STUDY_CACHE_MAX_STALE_MS,
+      ),
     };
     host[STUDY_LINEAGE_CACHE_SYMBOL] = registry;
   }
@@ -1831,6 +1884,7 @@ const {
   flavorTrajectoryCache,
   topNavbarMetadataCache,
   emptySearchResponseCache,
+  referenceDictionaryCache,
 } = getStudyLineageCacheRegistry();
 
 /** Clears module-level study and trajectory caches (useful in unit tests). */
@@ -1839,6 +1893,29 @@ export function clearStudyLineageCaches(): void {
   flavorTrajectoryCache.clear();
   topNavbarMetadataCache.clear();
   emptySearchResponseCache.clear();
+  referenceDictionaryCache.clear();
+}
+
+export function seedFlavorTrajectoryCacheFromGlobalDataset(
+  cacheNamespace: string,
+  nowMs: number,
+  entries: ReadonlyArray<{
+    flavorId: number;
+    points: readonly FlavorCrossStudyPoint[];
+  }>,
+): void {
+  const normalized = cacheNamespace.trim().replace(/\/+$/, "");
+  if (!normalized || entries.length === 0) {
+    return;
+  }
+  void flavorTrajectoryCache.resolveManyWithSwr<number>({
+    namespace: normalized,
+    keys: entries.map((e) => e.flavorId),
+    nowMs,
+    resolveCompletedAtMs: () => nowMs,
+    batchLoader: async () =>
+      new Map(entries.map((e) => [e.flavorId, e.points])),
+  });
 }
 
 /**
@@ -1999,7 +2076,25 @@ export async function fetchChunkedRowsConcurrently<
       const pages = await mapWithConcurrency(
         windows,
         pageConcurrency,
-        (win) => fetchWindowWithRetry(chunk, win.from, win.to),
+        async (win) => {
+          const expectedRows = Math.min(safePageSize, exactCount - win.from);
+          const firstBatch = await fetchWindowWithRetry(chunk, win.from, win.to);
+          if (firstBatch.length === 0 || firstBatch.length >= expectedRows) {
+            return firstBatch;
+          }
+          // Drain sub-windows if the server enforces a smaller db-max-rows cap than safePageSize.
+          const acc = [...firstBatch];
+          let cursor = win.from + firstBatch.length;
+          while (acc.length < expectedRows && cursor <= win.to) {
+            const sub = await fetchWindowWithRetry(chunk, cursor, win.to);
+            if (sub.length === 0) {
+              break;
+            }
+            acc.push(...sub);
+            cursor += sub.length;
+          }
+          return acc;
+        },
       );
 
       const collected = pages.flat();
@@ -2046,56 +2141,19 @@ export async function fetchChunkedRowsConcurrently<
   return perChunk.flat();
 }
 
-async function loadUncachedStudyRawDataset(
+async function fetchReferenceDictionariesUncached(
   supabase: SupabaseClient<Database>,
-  studyId: number,
-): Promise<CachedStudyRawDataset> {
-  // Wave 1: mappings, participations, and small reference dictionaries.
-  const [
-    studyMappings,
-    participationRows,
-    flavors,
-    flavorSteps,
-    models,
-    providers,
-    demographicQuestions,
-    demographicAnswers,
-    demographicMappings,
-  ] = await Promise.all([
-    fetchAllRows<RawStudyMappingRow>({
-      contextLabel: "study caption mappings",
-      runQuery: (from, to) =>
-        supabase
-          .from("study_caption_mappings")
-          .select("id, study_id, caption_id")
-          .eq("study_id", studyId)
-          .order("id", { ascending: true })
-          .range(from, to) as PromiseLike<
-          SupabaseListResult<RawStudyMappingRow>
-        >,
-    }),
-    fetchAllRows<RawStudyParticipationRow>({
-      contextLabel: "study participations",
-      runQuery: (from, to) =>
-        supabase
-          .from("study_participations")
-          .select("profile_id, study_id, started_at, ended_at, completion_stats")
-          .eq("study_id", studyId)
-          .order("started_at", { ascending: true })
-          .order("profile_id", { ascending: true })
-          .range(from, to) as PromiseLike<
-          SupabaseListResult<RawStudyParticipationRow>
-        >,
-    }),
-    fetchAllRows<RawFlavorRow>({
-      contextLabel: "humor flavors",
-      runQuery: (from, to) =>
-        supabase
-          .from("humor_flavors")
-          .select("id, slug, description")
-          .order("id", { ascending: true })
-          .range(from, to) as PromiseLike<SupabaseListResult<RawFlavorRow>>,
-    }),
+): Promise<CachedReferenceDictionaries> {
+  const flavors = await fetchAllRows<RawFlavorRow>({
+    contextLabel: "humor flavors",
+    runQuery: (from, to) =>
+      supabase
+        .from("humor_flavors")
+        .select("id, slug, description")
+        .order("id", { ascending: true })
+        .range(from, to) as PromiseLike<SupabaseListResult<RawFlavorRow>>,
+  });
+  const [flavorSteps, models, providers] = await Promise.all([
     fetchAllRows<RawFlavorStepRow>({
       contextLabel: "humor flavor steps",
       runQuery: (from, to) =>
@@ -2123,88 +2181,282 @@ async function loadUncachedStudyRawDataset(
           .order("id", { ascending: true })
           .range(from, to) as PromiseLike<SupabaseListResult<RawProviderRow>>,
     }),
-    fetchAllRows<RawDemographicQuestionRow>({
-      contextLabel: "demographic questions",
+  ]);
+  const [demographicQuestions, demographicAnswers, demographicMappings] =
+    await Promise.all([
+      fetchAllRows<RawDemographicQuestionRow>({
+        contextLabel: "demographic questions",
+        runQuery: (from, to) =>
+          supabase
+            .from("demographic_questions")
+            .select("id, question")
+            .order("id", { ascending: true })
+            .range(from, to) as PromiseLike<
+            SupabaseListResult<RawDemographicQuestionRow>
+          >,
+      }),
+      fetchAllRows<RawDemographicAnswerRow>({
+        contextLabel: "demographic answers",
+        runQuery: (from, to) =>
+          supabase
+            .from("demographic_answers")
+            .select("id, answer")
+            .order("id", { ascending: true })
+            .range(from, to) as PromiseLike<
+            SupabaseListResult<RawDemographicAnswerRow>
+          >,
+      }),
+      fetchAllRows<RawDemographicMappingRow>({
+        contextLabel: "demographic answer mappings",
+        runQuery: (from, to) =>
+          supabase
+            .from("demographic_answer_question_mapping")
+            .select("id, question_id, answer_id, display_order, is_deleted")
+            .order("id", { ascending: true })
+            .range(from, to) as PromiseLike<
+            SupabaseListResult<RawDemographicMappingRow>
+          >,
+      }),
+    ]);
+
+  return {
+    flavors,
+    flavorSteps,
+    models,
+    providers,
+    demographicQuestions,
+    demographicAnswers,
+    demographicMappings,
+  };
+}
+
+async function resolveReferenceDictionaries(
+  supabase: SupabaseClient<Database>,
+  cacheNamespace: string | null,
+  nowMs: number,
+  resolveCompletedAtMs: () => number,
+): Promise<CachedReferenceDictionaries> {
+  if (cacheNamespace !== null) {
+    return referenceDictionaryCache.resolveWithSwr(
+      cacheNamespace,
+      nowMs,
+      resolveCompletedAtMs,
+      () => fetchReferenceDictionariesUncached(supabase),
+    );
+  }
+  return fetchReferenceDictionariesUncached(supabase);
+}
+
+async function loadUncachedStudyRawDataset(
+  supabase: SupabaseClient<Database>,
+  studyId: number,
+  cacheNamespace: string | null,
+  nowMs: number,
+  resolveCompletedAtMs: () => number,
+): Promise<CachedStudyRawDataset> {
+  // Wave 1: mappings and participations first (<= 2 sockets) so event scans start immediately.
+  const [studyMappings, participationRows] = await Promise.all([
+    fetchAllRows<RawStudyMappingRow>({
+      contextLabel: "study caption mappings",
       runQuery: (from, to) =>
         supabase
-          .from("demographic_questions")
-          .select("id, question")
+          .from("study_caption_mappings")
+          .select("id, study_id, caption_id")
+          .eq("study_id", studyId)
           .order("id", { ascending: true })
           .range(from, to) as PromiseLike<
-          SupabaseListResult<RawDemographicQuestionRow>
+          SupabaseListResult<RawStudyMappingRow>
         >,
     }),
-    fetchAllRows<RawDemographicAnswerRow>({
-      contextLabel: "demographic answers",
+    fetchAllRows<RawStudyParticipationRow>({
+      contextLabel: "study participations",
       runQuery: (from, to) =>
         supabase
-          .from("demographic_answers")
-          .select("id, answer")
-          .order("id", { ascending: true })
+          .from("study_participations")
+          .select("profile_id, study_id, started_at, ended_at, completion_stats")
+          .eq("study_id", studyId)
+          .order("started_at", { ascending: true })
+          .order("profile_id", { ascending: true })
           .range(from, to) as PromiseLike<
-          SupabaseListResult<RawDemographicAnswerRow>
-        >,
-    }),
-    fetchAllRows<RawDemographicMappingRow>({
-      contextLabel: "demographic answer mappings",
-      runQuery: (from, to) =>
-        supabase
-          .from("demographic_answer_question_mapping")
-          .select("id, question_id, answer_id, display_order, is_deleted")
-          .order("id", { ascending: true })
-          .range(from, to) as PromiseLike<
-          SupabaseListResult<RawDemographicMappingRow>
+          SupabaseListResult<RawStudyParticipationRow>
         >,
     }),
   ]);
 
   const mappingIds = studyMappings.map((row) => row.id);
+  const captionIdByMappingId = new Map(
+    studyMappings.map((row) => [row.id, row.caption_id]),
+  );
   const mappedCaptionIds = Array.from(
     new Set(studyMappings.map((row) => row.caption_id)),
   );
 
-  // Wave 2: concurrent multi-page vote & navigation scans + mapped captions.
-  const [voteRows, navigationRows, captions] = await Promise.all([
-    fetchChunkedRowsConcurrently<number, RawStudyVoteRow>({
-      ids: mappingIds,
-      contextLabel: "study caption vote events",
-      runCountQuery: (chunk) =>
-        supabase
-          .from("study_caption_vote_events")
-          .select("id", { count: "exact", head: true })
-          .in("study_caption_mapping_id", chunk),
-      runPageQuery: (chunk, from, to) =>
-        supabase
-          .from("study_caption_vote_events")
-          .select(
-            "id, profile_id, caption_id, study_caption_mapping_id, vote_value, time_to_vote_ms, session_id, created_datetime_utc",
-          )
-          .in("study_caption_mapping_id", chunk)
-          .order("id", { ascending: true })
-          .range(from, to) as PromiseLike<SupabaseListResult<RawStudyVoteRow>>,
-    }),
-    fetchChunkedRowsConcurrently<number, RawStudyNavigationRow>({
-      ids: mappingIds,
-      contextLabel: "study caption navigation events",
-      runCountQuery: (chunk) =>
-        supabase
-          .from("study_caption_navigation_events")
-          .select("id", { count: "exact", head: true })
-          .in("study_caption_mapping_id", chunk),
-      runPageQuery: (chunk, from, to) =>
-        supabase
-          .from("study_caption_navigation_events")
-          .select(
-            "id, profile_id, caption_id, study_caption_mapping_id, time_to_next_caption_ms, session_id, created_datetime_utc",
-          )
-          .in("study_caption_mapping_id", chunk)
-          .order("id", { ascending: true })
-          .range(from, to) as PromiseLike<
-          SupabaseListResult<RawStudyNavigationRow>
-        >,
-    }),
+  // Wave 2: bounded-concurrency composite-index scans (<= 3 sockets, omitting redundant caption_id UUIDs).
+  const hasNavRows =
+    studyId >= NEW_STYLE_MIN_STUDY_ID && mappingIds.length > 0
+      ? await probeTableHasRowForMappings(
+          supabase,
+          "study_caption_navigation_events",
+          mappingIds,
+        )
+      : false;
+
+  type WireVoteRow = {
+    id: number;
+    p?: string;
+    profile_id?: string;
+    m?: number | null;
+    study_caption_mapping_id?: number | null;
+    v?: StudyVoteValue;
+    vote_value?: StudyVoteValue;
+    t?: number | null;
+    time_to_vote_ms?: number | null;
+    s?: string | null;
+    session_id?: string | null;
+    c?: string;
+    created_datetime_utc?: string;
+    caption_id?: string;
+  };
+  type WireNavRow = {
+    id: number;
+    p?: string;
+    profile_id?: string;
+    m?: number | null;
+    study_caption_mapping_id?: number | null;
+    t?: number | null;
+    time_to_next_caption_ms?: number | null;
+    s?: string | null;
+    session_id?: string | null;
+    c?: string;
+    created_datetime_utc?: string;
+    caption_id?: string;
+  };
+
+  const hasUntimedVotes =
+    !hasNavRows && mappingIds.length > 0
+      ? await fetchHasAnyRow<{ id: number }>({
+          contextLabel: "study caption vote events untimed probe",
+          runQuery: () =>
+            supabase
+              .from("study_caption_vote_events")
+              .select("id")
+              .in("study_caption_mapping_id", mappingIds.slice(0, 120))
+              .is("time_to_vote_ms", null)
+              .limit(1) as PromiseLike<SupabaseListResult<{ id: number }>>,
+        })
+      : false;
+
+  const voteSelectCols = hasNavRows
+    ? "id,p:profile_id,m:study_caption_mapping_id,v:vote_value,t:time_to_vote_ms,s:session_id,c:created_datetime_utc"
+    : hasUntimedVotes
+      ? "id,p:profile_id,m:study_caption_mapping_id,v:vote_value,t:time_to_vote_ms,c:created_datetime_utc"
+      : "id,p:profile_id,m:study_caption_mapping_id,v:vote_value,t:time_to_vote_ms";
+
+  const wireVoteRows = await fetchRowsByIdChunks<number, WireVoteRow>({
+    ids: mappingIds,
+    chunkSize: 22,
+    pageSize: 6000,
+    concurrency: 3,
+    contextLabel: "study caption vote events",
+    runQuery: (chunk, from, to) =>
+      supabase
+        .from("study_caption_vote_events")
+        .select(voteSelectCols)
+        .in("study_caption_mapping_id", chunk)
+        .order("study_caption_mapping_id", {
+          ascending: true,
+          nullsFirst: true,
+        })
+        .order("id", { ascending: true, nullsFirst: true })
+        .range(from, to) as unknown as PromiseLike<
+        SupabaseListResult<WireVoteRow>
+      >,
+  });
+
+  const wireNavigationRows = hasNavRows
+    ? await fetchRowsByIdChunks<number, WireNavRow>({
+        ids: mappingIds,
+        chunkSize: 30,
+        pageSize: 4500,
+        concurrency: 3,
+        contextLabel: "study caption navigation events",
+        runQuery: (chunk, from, to) =>
+          supabase
+            .from("study_caption_navigation_events")
+            .select(
+              "id,p:profile_id,m:study_caption_mapping_id,t:time_to_next_caption_ms,s:session_id,c:created_datetime_utc",
+            )
+            .in("study_caption_mapping_id", chunk)
+            .order("study_caption_mapping_id", {
+              ascending: true,
+              nullsFirst: true,
+            })
+            .order("created_datetime_utc", {
+              ascending: true,
+              nullsFirst: true,
+            })
+            .order("id", { ascending: true, nullsFirst: true })
+            .range(from, to) as unknown as PromiseLike<
+            SupabaseListResult<WireNavRow>
+          >,
+      })
+    : [];
+
+  const voteRows: RawStudyVoteRow[] = wireVoteRows.map((row) => {
+    const mappingId =
+      row.m !== undefined ? row.m : (row.study_caption_mapping_id ?? null);
+    return {
+      id: row.id,
+      profile_id: row.p ?? row.profile_id ?? "",
+      study_caption_mapping_id: mappingId,
+      vote_value: (row.v ?? row.vote_value ?? "meh") as StudyVoteValue,
+      time_to_vote_ms:
+        row.t !== undefined ? row.t : (row.time_to_vote_ms ?? null),
+      session_id: row.s !== undefined ? row.s : (row.session_id ?? null),
+      created_datetime_utc: row.c ?? row.created_datetime_utc ?? "",
+      caption_id:
+        (mappingId !== null ? captionIdByMappingId.get(mappingId) : undefined) ??
+        row.caption_id ??
+        "",
+    };
+  });
+  const navigationRows: RawStudyNavigationRow[] = wireNavigationRows.map(
+    (row) => {
+      const mappingId =
+        row.m !== undefined ? row.m : (row.study_caption_mapping_id ?? null);
+      return {
+        id: row.id,
+        profile_id: row.p ?? row.profile_id ?? "",
+        study_caption_mapping_id: mappingId,
+        time_to_next_caption_ms:
+          row.t !== undefined ? row.t : (row.time_to_next_caption_ms ?? null),
+        session_id: row.s !== undefined ? row.s : (row.session_id ?? null),
+        created_datetime_utc: row.c ?? row.created_datetime_utc ?? "",
+        caption_id:
+          (mappingId !== null
+            ? captionIdByMappingId.get(mappingId)
+            : undefined) ??
+          row.caption_id ??
+          "",
+      };
+    },
+  );
+
+  const [
+    captions,
+    {
+      flavors,
+      flavorSteps,
+      models,
+      providers,
+      demographicQuestions,
+      demographicAnswers,
+      demographicMappings,
+    },
+  ] = await Promise.all([
     fetchRowsByIdChunks<string, RawCaptionLineageRow>({
       ids: mappedCaptionIds,
+      concurrency: 1,
       contextLabel: "captions",
       runQuery: (chunk, from, to) =>
         supabase
@@ -2218,6 +2470,12 @@ async function loadUncachedStudyRawDataset(
           SupabaseListResult<RawCaptionLineageRow>
         >,
     }),
+    resolveReferenceDictionaries(
+      supabase,
+      cacheNamespace,
+      nowMs,
+      resolveCompletedAtMs,
+    ),
   ]);
 
   const imageIds = captions
@@ -2247,66 +2505,67 @@ async function loadUncachedStudyRawDataset(
   }
   const allStudyVoterIds = Array.from(allStudyVoterIdsSet);
 
-  // Wave 3: images, prompt-chain LLM responses, and study voters' demographic answers.
-  const [images, chainResponses, requestFallbackResponses, demographicResponses] =
-    await Promise.all([
-      fetchRowsByIdChunks<string, RawImageRow>({
-        ids: imageIds,
-        contextLabel: "images",
-        runQuery: (chunk, from, to) =>
-          supabase
-            .from("images")
-            .select("id, url, image_description")
-            .in("id", chunk)
-            .order("id", { ascending: true })
-            .range(from, to) as PromiseLike<SupabaseListResult<RawImageRow>>,
-      }),
-      fetchRowsByIdChunks<number, RawLlmResponseRow>({
-        ids: chainIds,
-        contextLabel: "llm model responses",
-        runQuery: (chunk, from, to) =>
-          supabase
-            .from("llm_model_responses")
-            .select(
-              "id, llm_prompt_chain_id, caption_request_id, humor_flavor_id, humor_flavor_step_id, llm_model_id, processing_time_seconds, created_datetime_utc",
-            )
-            .in("llm_prompt_chain_id", chunk)
-            .order("id", { ascending: true })
-            .range(from, to) as PromiseLike<
-            SupabaseListResult<RawLlmResponseRow>
-          >,
-      }),
-      fetchRowsByIdChunks<number, RawLlmResponseRow>({
-        ids: fallbackRequestIds,
-        contextLabel: "llm model responses by request",
-        runQuery: (chunk, from, to) =>
-          supabase
-            .from("llm_model_responses")
-            .select(
-              "id, llm_prompt_chain_id, caption_request_id, humor_flavor_id, humor_flavor_step_id, llm_model_id, processing_time_seconds, created_datetime_utc",
-            )
-            .in("caption_request_id", chunk)
-            .order("id", { ascending: true })
-            .range(from, to) as PromiseLike<
-            SupabaseListResult<RawLlmResponseRow>
-          >,
-      }),
-      fetchRowsByIdChunks<string, RawDemographicUserResponseRow>({
-        ids: allStudyVoterIds,
-        contextLabel: "demographic user responses",
-        runQuery: (chunk, from, to) =>
-          supabase
-            .from("demographic_user_responses")
-            .select(
-              "id, user_id, answer_question_mapping_id, created_datetime_utc, modified_datetime_utc",
-            )
-            .in("user_id", chunk)
-            .order("id", { ascending: true })
-            .range(from, to) as PromiseLike<
-            SupabaseListResult<RawDemographicUserResponseRow>
-          >,
-      }),
-    ]);
+  // Wave 3: images, prompt-chain LLM responses, and study voters' demographic answers (<= 2 sockets).
+  const [images, chainResponses] = await Promise.all([
+    fetchRowsByIdChunks<string, RawImageRow>({
+      ids: imageIds,
+      concurrency: 1,
+      contextLabel: "images",
+      runQuery: (chunk, from, to) =>
+        supabase
+          .from("images")
+          .select("id, url, image_description")
+          .in("id", chunk)
+          .order("id", { ascending: true })
+          .range(from, to) as PromiseLike<SupabaseListResult<RawImageRow>>,
+    }),
+    fetchRowsByIdChunks<number, RawLlmResponseRow>({
+      ids: chainIds,
+      concurrency: 2,
+      contextLabel: "llm model responses",
+      runQuery: (chunk, from, to) =>
+        supabase
+          .from("llm_model_responses")
+          .select(
+            "id, llm_prompt_chain_id, caption_request_id, humor_flavor_id, humor_flavor_step_id, llm_model_id, processing_time_seconds, created_datetime_utc",
+          )
+          .in("llm_prompt_chain_id", chunk)
+          .order("id", { ascending: true })
+          .range(from, to) as PromiseLike<SupabaseListResult<RawLlmResponseRow>>,
+    }),
+  ]);
+  const [requestFallbackResponses, demographicResponses] = await Promise.all([
+    fetchRowsByIdChunks<number, RawLlmResponseRow>({
+      ids: fallbackRequestIds,
+      concurrency: 1,
+      contextLabel: "llm model responses by request",
+      runQuery: (chunk, from, to) =>
+        supabase
+          .from("llm_model_responses")
+          .select(
+            "id, llm_prompt_chain_id, caption_request_id, humor_flavor_id, humor_flavor_step_id, llm_model_id, processing_time_seconds, created_datetime_utc",
+          )
+          .in("caption_request_id", chunk)
+          .order("id", { ascending: true })
+          .range(from, to) as PromiseLike<SupabaseListResult<RawLlmResponseRow>>,
+    }),
+    fetchRowsByIdChunks<string, RawDemographicUserResponseRow>({
+      ids: allStudyVoterIds,
+      concurrency: 2,
+      contextLabel: "demographic user responses",
+      runQuery: (chunk, from, to) =>
+        supabase
+          .from("demographic_user_responses")
+          .select(
+            "id, user_id, answer_question_mapping_id, created_datetime_utc, modified_datetime_utc",
+          )
+          .in("user_id", chunk)
+          .order("id", { ascending: true })
+          .range(from, to) as PromiseLike<
+          SupabaseListResult<RawDemographicUserResponseRow>
+        >,
+    }),
+  ]);
 
   const imagesById = new Map(images.map((image) => [image.id, image]));
   const dedupedLlmResponses = Array.from(
@@ -2350,20 +2609,30 @@ async function loadUncachedStudyRawDataset(
 export async function fetchStudyAttributionBundleWithClient(
   supabase: SupabaseClient<Database>,
   studyId: number,
-  options?: { excludeHighRisk?: boolean; nowMs?: number },
+  options?: {
+    excludeHighRisk?: boolean;
+    nowMs?: number;
+    preverified?: {
+      cacheNamespace: string | null;
+      studies: StudySummaryRow[];
+    };
+  },
 ): Promise<StudyAttributionBundle | null> {
   if (!Number.isInteger(studyId) || studyId <= 0) {
     return null;
   }
   const excludeHighRisk = options?.excludeHighRisk === true;
   const nowMs = options?.nowMs ?? Date.now();
+  const resolveCompletedAtMs = () => options?.nowMs ?? Date.now();
 
   // Always check live caller superadmin status + live study visibility FIRST
   // before touching any cross-request module-level cache entry.
-  const [cacheNamespace, studies] = await Promise.all([
-    resolveVerifiedSuperadminCacheNamespace(supabase),
-    fetchStudiesList(supabase),
-  ]);
+  const [cacheNamespace, studies] = options?.preverified
+    ? [options.preverified.cacheNamespace, options.preverified.studies]
+    : await Promise.all([
+        resolveVerifiedSuperadminCacheNamespace(supabase),
+        fetchStudiesList(supabase),
+      ]);
 
   const study = studies.find((candidate) => candidate.id === studyId);
   if (!study) {
@@ -2378,10 +2647,23 @@ export async function fetchStudyAttributionBundleWithClient(
       ? await studyRawDatasetCache.resolveWithSwr(
           cacheKey,
           nowMs,
-          () => options?.nowMs ?? Date.now(),
-          () => loadUncachedStudyRawDataset(supabase, studyId),
+          resolveCompletedAtMs,
+          () =>
+            loadUncachedStudyRawDataset(
+              supabase,
+              studyId,
+              cacheNamespace,
+              nowMs,
+              resolveCompletedAtMs,
+            ),
         )
-      : await loadUncachedStudyRawDataset(supabase, studyId);
+      : await loadUncachedStudyRawDataset(
+          supabase,
+          studyId,
+          null,
+          nowMs,
+          resolveCompletedAtMs,
+        );
 
   const cachedComputed = excludeHighRisk
     ? rawData.computedFiltered
@@ -2484,44 +2766,65 @@ async function loadUncachedFlavorTrajectoriesBatch(
   supabase: SupabaseClient<Database>,
   studies: readonly StudySummaryRow[],
   missingFlavorIds: readonly number[],
+  cacheNamespace: string | null,
+  nowMs: number,
+  resolveCompletedAtMs: () => number,
+  precomputedStudy?: {
+    studyId: number;
+    pointsByFlavorId: ReadonlyMap<number, FlavorCrossStudyPoint>;
+  },
 ): Promise<Map<number, readonly FlavorCrossStudyPoint[]>> {
   const targetSet = new Set(missingFlavorIds);
-  const [allMappings, flavors] = await Promise.all([
-    fetchAllStudyMappings(supabase),
-    fetchAllRows<RawFlavorRow>({
-      contextLabel: "humor flavors",
+  const [flavors, directFkCaptions, nullFkMetadataCaptions] = await Promise.all([
+    cacheNamespace !== null
+      ? resolveReferenceDictionaries(
+          supabase,
+          cacheNamespace,
+          nowMs,
+          resolveCompletedAtMs,
+        ).then((dict) => dict.flavors)
+      : fetchAllRows<RawFlavorRow>({
+          contextLabel: "humor flavors",
+          runQuery: (from, to) =>
+            supabase
+              .from("humor_flavors")
+              .select("id, slug, description")
+              .order("id", { ascending: true })
+              .range(from, to) as PromiseLike<SupabaseListResult<RawFlavorRow>>,
+        }),
+    fetchRowsByIdChunks<number, RawCaptionFlavorOnlyRow>({
+      ids: missingFlavorIds,
+      chunkSize: 100,
+      concurrency: 2,
+      contextLabel: "trajectory direct-FK captions",
+      runQuery: (chunk, from, to) =>
+        supabase
+          .from("captions")
+          .select("id, humor_flavor_id, metadata")
+          .in("humor_flavor_id", chunk)
+          .order("id", { ascending: true })
+          .range(from, to) as PromiseLike<
+          SupabaseListResult<RawCaptionFlavorOnlyRow>
+        >,
+    }),
+    fetchAllRows<RawCaptionFlavorOnlyRow>({
+      contextLabel: "trajectory metadata captions",
       runQuery: (from, to) =>
         supabase
-          .from("humor_flavors")
-          .select("id, slug, description")
+          .from("captions")
+          .select("id, humor_flavor_id, metadata")
+          .is("humor_flavor_id", null)
+          .not("metadata", "is", null)
           .order("id", { ascending: true })
-          .range(from, to) as PromiseLike<SupabaseListResult<RawFlavorRow>>,
+          .range(from, to) as PromiseLike<
+          SupabaseListResult<RawCaptionFlavorOnlyRow>
+        >,
     }),
   ]);
 
-  const distinctMappedCaptionIds = Array.from(
-    new Set(allMappings.map((m) => m.caption_id)),
-  );
-  const mappedCaptions = await fetchRowsByIdChunks<
-    string,
-    RawCaptionFlavorOnlyRow
-  >({
-    ids: distinctMappedCaptionIds,
-    contextLabel: "trajectory mapped captions",
-    runQuery: (chunk, from, to) =>
-      supabase
-        .from("captions")
-        .select("id, humor_flavor_id, metadata")
-        .in("id", chunk)
-        .order("id", { ascending: true })
-        .range(from, to) as PromiseLike<
-        SupabaseListResult<RawCaptionFlavorOnlyRow>
-      >,
-  });
-
   const { flavorsById, flavorsBySlugLower } = buildFlavorLookupMaps(flavors);
   const targetFlavorByCaptionId = new Map<string, number>();
-  for (const caption of mappedCaptions) {
+  for (const caption of [...directFkCaptions, ...nullFkMetadataCaptions]) {
     const { flavor } = resolveEffectiveCaptionFlavor(
       caption,
       flavorsById,
@@ -2532,7 +2835,24 @@ async function loadUncachedFlavorTrajectoriesBatch(
     }
   }
 
-  const allMappingIdsByStudy = new Map<number, number[]>();
+  if (targetFlavorByCaptionId.size === 0) {
+    return new Map(missingFlavorIds.map((flavorId) => [flavorId, []]));
+  }
+
+  const targetMappings = await fetchRowsByIdChunks<string, RawStudyMappingRow>({
+    ids: Array.from(targetFlavorByCaptionId.keys()),
+    chunkSize: 180,
+    concurrency: 2,
+    contextLabel: "trajectory target mappings",
+    runQuery: (chunk, from, to) =>
+      supabase
+        .from("study_caption_mappings")
+        .select("id, study_id, caption_id")
+        .in("caption_id", chunk)
+        .order("id", { ascending: true })
+        .range(from, to) as PromiseLike<SupabaseListResult<RawStudyMappingRow>>,
+  });
+
   type StudyFlavorGroup = {
     mappingIds: number[];
     captionIds: Set<string>;
@@ -2542,14 +2862,7 @@ async function loadUncachedFlavorTrajectoriesBatch(
     Map<number, StudyFlavorGroup>
   >();
 
-  for (const mapping of allMappings) {
-    let allList = allMappingIdsByStudy.get(mapping.study_id);
-    if (!allList) {
-      allList = [];
-      allMappingIdsByStudy.set(mapping.study_id, allList);
-    }
-    allList.push(mapping.id);
-
+  for (const mapping of targetMappings) {
     const flavorId = targetFlavorByCaptionId.get(mapping.caption_id);
     if (flavorId === undefined) {
       continue;
@@ -2570,26 +2883,61 @@ async function loadUncachedFlavorTrajectoriesBatch(
   }
 
   const studiesById = new Map(studies.map((s) => [s.id, s]));
-  const candidateStudyIds = Array.from(flavorGroupsByStudy.keys()).sort(
-    (a, b) => a - b,
+  const candidateStudyIds = Array.from(flavorGroupsByStudy.keys())
+    .filter((id) => studiesById.has(id))
+    .sort((a, b) => a - b);
+
+  const probeCandidateStudyIds = candidateStudyIds.filter(
+    (id) =>
+      id >= NEW_STYLE_MIN_STUDY_ID &&
+      id !== precomputedStudy?.studyId,
   );
+  const candidateStudyMappings =
+    probeCandidateStudyIds.length > 0
+      ? await fetchRowsByIdChunks<number, Pick<RawStudyMappingRow, "id" | "study_id">>({
+          ids: probeCandidateStudyIds,
+          chunkSize: 50,
+          concurrency: 2,
+          contextLabel: "trajectory candidate study mappings",
+          runQuery: (chunk, from, to) =>
+            supabase
+              .from("study_caption_mappings")
+              .select("id, study_id")
+              .in("study_id", chunk)
+              .order("study_id", { ascending: true })
+              .order("id", { ascending: true })
+              .range(from, to) as PromiseLike<
+              SupabaseListResult<Pick<RawStudyMappingRow, "id" | "study_id">>
+            >,
+        })
+      : [];
 
-  const perStudyPoints = await mapWithConcurrency(
-    candidateStudyIds,
-    TRAJECTORY_STUDY_CONCURRENCY,
-    async (
-      candidateStudyId,
-    ): Promise<Array<{ flavorId: number; point: FlavorCrossStudyPoint }>> => {
-      const study = studiesById.get(candidateStudyId);
-      const studyFlavorMap = flavorGroupsByStudy.get(candidateStudyId);
-      if (!study || !studyFlavorMap) {
-        return [];
-      }
+  const allMappingIdsByStudy = new Map<number, number[]>();
+  for (const mapping of candidateStudyMappings) {
+    let allList = allMappingIdsByStudy.get(mapping.study_id);
+    if (!allList) {
+      allList = [];
+      allMappingIdsByStudy.set(mapping.study_id, allList);
+    }
+    allList.push(mapping.id);
+  }
 
+  // Step 1: Resolve exposure era across all candidate studies with bounded concurrency.
+  const eraByStudyId = new Map<
+    number,
+    ReturnType<typeof resolveStudyExposureMode>
+  >();
+  await mapWithConcurrency(
+    candidateStudyIds.filter((id) => id !== precomputedStudy?.studyId),
+    3,
+    async (candidateStudyId) => {
       const studyAllMappings = allMappingIdsByStudy.get(candidateStudyId) ?? [];
       let hasNavigationEvents = false;
       let hasVoteEvents = false;
-      if (candidateStudyId >= NEW_STYLE_MIN_STUDY_ID && studyAllMappings.length > 0) {
+      if (
+        candidateStudyId >= NEW_STYLE_MIN_STUDY_ID &&
+        studyAllMappings.length > 0
+      ) {
         hasNavigationEvents = await probeTableHasRowForMappings(
           supabase,
           "study_caption_navigation_events",
@@ -2603,167 +2951,210 @@ async function loadUncachedFlavorTrajectoriesBatch(
           );
         }
       }
+      eraByStudyId.set(
+        candidateStudyId,
+        resolveStudyExposureMode({
+          studyId: candidateStudyId,
+          hasNavigationEvents,
+          hasVoteEvents,
+        }),
+      );
+    },
+  );
 
-      const resolved = resolveStudyExposureMode({
-        studyId: candidateStudyId,
-        hasNavigationEvents,
-        hasVoteEvents,
-      });
-
-      if (resolved.mode === "likert_votes") {
-        // HEAD exact-count fast path: transfers zero row payloads even across
-        // studies with 55k+ votes per study / 222k+ cross-study vote rows.
-        return mapWithConcurrency(
-          Array.from(studyFlavorMap.entries()),
-          ERA_PROBE_CONCURRENCY,
-          async ([flavorId, group]) => {
-            const [exposures, positive] = await Promise.all([
-              sumExactCountsByIdChunks({
-                ids: group.mappingIds,
-                contextLabel: `trajectory exposures study ${candidateStudyId}`,
-                runQuery: (chunk) =>
-                  supabase
-                    .from("study_caption_vote_events")
-                    .select("id", { count: "exact", head: true })
-                    .in("study_caption_mapping_id", chunk),
-              }),
-              sumExactCountsByIdChunks({
-                ids: group.mappingIds,
-                contextLabel: `trajectory positive study ${candidateStudyId}`,
-                runQuery: (chunk) =>
-                  supabase
-                    .from("study_caption_vote_events")
-                    .select("id", { count: "exact", head: true })
-                    .in("study_caption_mapping_id", chunk)
-                    .in("vote_value", ["funny", "very funny"]),
-              }),
-            ]);
-            const ci = computeWilsonConfidenceInterval(positive, exposures);
-            return {
-              flavorId,
-              point: {
-                studyId: candidateStudyId,
-                studySlug: study.slug,
-                studyLabel: getStudyDisplayLabel(study),
-                exposureMode: resolved.mode,
-                formatLabel: "Likert" as const,
-                captionCount: group.captionIds.size,
-                exposures,
-                positive,
-                rate: ci.rate,
-                ciLow: ci.low,
-                ciHigh: ci.high,
-              },
-            };
-          },
-        );
-      }
-
-      // Swipe navigation mode: match same-session (profile_id, mapping_id, session_id) pairs.
-      const unionMappingIds: number[] = [];
-      const flavorIdByMappingId = new Map<number, number>();
-      for (const [flavorId, group] of studyFlavorMap.entries()) {
-        for (const mId of group.mappingIds) {
-          unionMappingIds.push(mId);
-          flavorIdByMappingId.set(mId, flavorId);
+  const precomputedPoints: Array<{
+    flavorId: number;
+    point: FlavorCrossStudyPoint;
+  }> = [];
+  const likertStudyIds: number[] = [];
+  const swipeStudyIds: number[] = [];
+  for (const studyId of candidateStudyIds) {
+    if (precomputedStudy && precomputedStudy.studyId === studyId) {
+      const studyFlavorMap = flavorGroupsByStudy.get(studyId);
+      if (studyFlavorMap) {
+        for (const flavorId of studyFlavorMap.keys()) {
+          const seeded = precomputedStudy.pointsByFlavorId.get(flavorId);
+          if (seeded) {
+            precomputedPoints.push({ flavorId, point: seeded });
+          }
         }
       }
+      continue;
+    }
+    const era = eraByStudyId.get(studyId);
+    if (era?.mode === "likert_votes") {
+      likertStudyIds.push(studyId);
+    } else {
+      swipeStudyIds.push(studyId);
+    }
+  }
 
-      type MinSwipeRow = {
-        profile_id: string;
-        study_caption_mapping_id: number | null;
-        session_id: string | null;
-      };
+  // Step 2A: Batch all Swipe candidate studies into one consolidated nav + vote scan.
+  const swipeMetaByMappingId = new Map<
+    number,
+    { studyId: number; flavorId: number }
+  >();
+  const allSwipeTargetMappingIds: number[] = [];
+  for (const studyId of swipeStudyIds) {
+    const studyFlavorMap = flavorGroupsByStudy.get(studyId);
+    if (!studyFlavorMap) continue;
+    for (const [flavorId, group] of studyFlavorMap.entries()) {
+      for (const mId of group.mappingIds) {
+        allSwipeTargetMappingIds.push(mId);
+        swipeMetaByMappingId.set(mId, { studyId, flavorId });
+      }
+    }
+  }
 
-      const [navRows, voteRows] = await Promise.all([
-        fetchChunkedRowsConcurrently<number, MinSwipeRow>({
-          ids: unionMappingIds,
-          contextLabel: `trajectory swipe navs study ${candidateStudyId}`,
-          runCountQuery: (chunk) =>
-            supabase
-              .from("study_caption_navigation_events")
-              .select("id", { count: "exact", head: true })
-              .in("study_caption_mapping_id", chunk),
-          runPageQuery: (chunk, from, to) =>
-            supabase
-              .from("study_caption_navigation_events")
-              .select("profile_id, study_caption_mapping_id, session_id")
-              .in("study_caption_mapping_id", chunk)
-              .order("id", { ascending: true })
-              .range(from, to) as PromiseLike<SupabaseListResult<MinSwipeRow>>,
-        }),
-        fetchChunkedRowsConcurrently<number, MinSwipeRow>({
-          ids: unionMappingIds,
-          contextLabel: `trajectory swipe votes study ${candidateStudyId}`,
-          runCountQuery: (chunk) =>
-            supabase
-              .from("study_caption_vote_events")
-              .select("id", { count: "exact", head: true })
-              .in("study_caption_mapping_id", chunk),
-          runPageQuery: (chunk, from, to) =>
-            supabase
-              .from("study_caption_vote_events")
-              .select("profile_id, study_caption_mapping_id, session_id")
-              .in("study_caption_mapping_id", chunk)
-              .order("id", { ascending: true })
-              .range(from, to) as PromiseLike<SupabaseListResult<MinSwipeRow>>,
-        }),
-      ]);
+  type MinSwipePairRow = {
+    p?: string;
+    profile_id?: string;
+    m?: number | null;
+    study_caption_mapping_id?: number | null;
+  };
 
-      const likeKeys = new Set<string>();
-      for (const vote of voteRows) {
-        if (vote.study_caption_mapping_id !== null) {
-          likeKeys.add(
-            getSwipeEventMatchKey({
-              profile_id: vote.profile_id,
-              study_caption_mapping_id: vote.study_caption_mapping_id,
-              session_id: vote.session_id,
+  const swipePromise = (async (): Promise<
+    Array<{ flavorId: number; point: FlavorCrossStudyPoint }>
+  > => {
+    if (swipeStudyIds.length === 0) {
+      return [];
+    }
+    const [navRows, voteRows] =
+      allSwipeTargetMappingIds.length > 0
+        ? await Promise.all([
+            fetchRowsByIdChunks<number, MinSwipePairRow>({
+              ids: allSwipeTargetMappingIds,
+              chunkSize: 55,
+              pageSize: 4500,
+              concurrency: 3,
+              contextLabel: "trajectory batched swipe navs",
+              runQuery: (chunk, from, to) =>
+                supabase
+                  .from("study_caption_navigation_events")
+                  .select("p:profile_id,m:study_caption_mapping_id")
+                  .in("study_caption_mapping_id", chunk)
+                  .order("study_caption_mapping_id", {
+                    ascending: true,
+                    nullsFirst: true,
+                  })
+                  .order("created_datetime_utc", {
+                    ascending: true,
+                    nullsFirst: true,
+                  })
+                  .order("id", { ascending: true, nullsFirst: true })
+                  .range(from, to) as unknown as PromiseLike<
+                  SupabaseListResult<MinSwipePairRow>
+                >,
             }),
-          );
-        }
-      }
+            fetchRowsByIdChunks<number, MinSwipePairRow>({
+              ids: allSwipeTargetMappingIds,
+              chunkSize: 80,
+              concurrency: 2,
+              contextLabel: "trajectory batched swipe votes",
+              runQuery: (chunk, from, to) =>
+                supabase
+                  .from("study_caption_vote_events")
+                  .select("p:profile_id,m:study_caption_mapping_id")
+                  .in("study_caption_mapping_id", chunk)
+                  .in("vote_value", ["funny", "very funny"])
+                  .order("study_caption_mapping_id", {
+                    ascending: true,
+                    nullsFirst: true,
+                  })
+                  .order("id", { ascending: true, nullsFirst: true })
+                  .range(from, to) as unknown as PromiseLike<
+                  SupabaseListResult<MinSwipePairRow>
+                >,
+            }),
+          ])
+        : [[], []];
 
-      const seenPairs = new Map<string, { flavorId: number; liked: boolean }>();
-      for (const nav of navRows) {
-        if (nav.study_caption_mapping_id === null) {
-          continue;
-        }
-        const flavorId = flavorIdByMappingId.get(nav.study_caption_mapping_id);
-        if (flavorId === undefined) {
-          continue;
-        }
-        const pairKey = `${nav.profile_id}|${nav.study_caption_mapping_id}`;
-        const matched = likeKeys.has(
-          getSwipeEventMatchKey({
-            profile_id: nav.profile_id,
-            study_caption_mapping_id: nav.study_caption_mapping_id,
-            session_id: nav.session_id,
-          }),
-        );
-        const existing = seenPairs.get(pairKey);
-        if (!existing) {
-          seenPairs.set(pairKey, { flavorId, liked: matched });
-        } else if (matched) {
-          existing.liked = true;
-        }
+    const positiveMappingByPairKey = new Map<string, number>();
+    for (const vote of voteRows) {
+      const mappingId =
+        vote.m !== undefined ? vote.m : (vote.study_caption_mapping_id ?? null);
+      const profileId = vote.p ?? vote.profile_id ?? "";
+      if (mappingId === null || !profileId) {
+        continue;
       }
-
-      const tallies = new Map<number, { exposures: number; positive: number }>();
-      for (const { flavorId, liked } of seenPairs.values()) {
-        let cur = tallies.get(flavorId);
-        if (!cur) {
-          cur = { exposures: 0, positive: 0 };
-          tallies.set(flavorId, cur);
-        }
-        cur.exposures += 1;
-        if (liked) {
-          cur.positive += 1;
-        }
+      const pairKey = `${profileId}|${mappingId}`;
+      if (!positiveMappingByPairKey.has(pairKey)) {
+        positiveMappingByPairKey.set(pairKey, mappingId);
       }
+    }
 
-      const out: Array<{ flavorId: number; point: FlavorCrossStudyPoint }> = [];
+    const seenPairs = new Map<
+      string,
+      { studyId: number; flavorId: number; liked: boolean }
+    >();
+    for (const nav of navRows) {
+      const mappingId =
+        nav.m !== undefined ? nav.m : (nav.study_caption_mapping_id ?? null);
+      const profileId = nav.p ?? nav.profile_id ?? "";
+      if (mappingId === null || !profileId) {
+        continue;
+      }
+      const meta = swipeMetaByMappingId.get(mappingId);
+      if (!meta) {
+        continue;
+      }
+      const pairKey = `${profileId}|${mappingId}`;
+      const matched = positiveMappingByPairKey.has(pairKey);
+      const existing = seenPairs.get(pairKey);
+      if (!existing) {
+        seenPairs.set(pairKey, {
+          studyId: meta.studyId,
+          flavorId: meta.flavorId,
+          liked: matched,
+        });
+      } else if (matched) {
+        existing.liked = true;
+      }
+    }
+
+    for (const [pairKey, mappingId] of positiveMappingByPairKey.entries()) {
+      if (seenPairs.has(pairKey)) {
+        continue;
+      }
+      const meta = swipeMetaByMappingId.get(mappingId);
+      if (!meta) {
+        continue;
+      }
+      seenPairs.set(pairKey, {
+        studyId: meta.studyId,
+        flavorId: meta.flavorId,
+        liked: true,
+      });
+    }
+
+    const talliesByStudyFlavor = new Map<
+      string,
+      { exposures: number; positive: number }
+    >();
+    for (const { studyId, flavorId, liked } of seenPairs.values()) {
+      const sfKey = `${studyId}|${flavorId}`;
+      let cur = talliesByStudyFlavor.get(sfKey);
+      if (!cur) {
+        cur = { exposures: 0, positive: 0 };
+        talliesByStudyFlavor.set(sfKey, cur);
+      }
+      cur.exposures += 1;
+      if (liked) {
+        cur.positive += 1;
+      }
+    }
+
+    const out: Array<{ flavorId: number; point: FlavorCrossStudyPoint }> = [];
+    for (const studyId of swipeStudyIds) {
+      const study = studiesById.get(studyId);
+      const studyFlavorMap = flavorGroupsByStudy.get(studyId);
+      const resolved = eraByStudyId.get(studyId);
+      if (!study || !studyFlavorMap || !resolved) continue;
       for (const [flavorId, group] of studyFlavorMap.entries()) {
-        const tally = tallies.get(flavorId) ?? { exposures: 0, positive: 0 };
+        const tally = talliesByStudyFlavor.get(`${studyId}|${flavorId}`) ?? {
+          exposures: 0,
+          positive: 0,
+        };
         const ci = computeWilsonConfidenceInterval(
           tally.positive,
           tally.exposures,
@@ -2771,7 +3162,7 @@ async function loadUncachedFlavorTrajectoriesBatch(
         out.push({
           flavorId,
           point: {
-            studyId: candidateStudyId,
+            studyId,
             studySlug: study.slug,
             studyLabel: getStudyDisplayLabel(study),
             exposureMode: resolved.mode,
@@ -2785,7 +3176,72 @@ async function loadUncachedFlavorTrajectoriesBatch(
           },
         });
       }
-      return out;
+    }
+    return out;
+  })();
+
+  // Step 2B: Run zero-payload HEAD exact counts across Likert candidate studies concurrently.
+  const likertTasks: Array<{
+    studyId: number;
+    flavorId: number;
+    group: StudyFlavorGroup;
+  }> = [];
+  for (const studyId of likertStudyIds) {
+    const studyFlavorMap = flavorGroupsByStudy.get(studyId);
+    if (!studyFlavorMap) continue;
+    for (const [flavorId, group] of studyFlavorMap.entries()) {
+      likertTasks.push({ studyId, flavorId, group });
+    }
+  }
+
+  const swipePoints = await swipePromise;
+
+  const likertPoints = await mapWithConcurrency(
+    likertTasks,
+    2,
+    async ({ studyId, flavorId, group }) => {
+      const study = studiesById.get(studyId)!;
+      const resolved = eraByStudyId.get(studyId)!;
+      const [exposures, positive] = await Promise.all([
+        sumExactCountsByIdChunks({
+          ids: group.mappingIds,
+          chunkSize: 300,
+          contextLabel: `trajectory exposures study ${studyId}`,
+          runQuery: (chunk) =>
+            supabase
+              .from("study_caption_vote_events")
+              .select("id", { count: "exact", head: true })
+              .in("study_caption_mapping_id", chunk),
+        }),
+        sumExactCountsByIdChunks({
+          ids: group.mappingIds,
+          chunkSize: 300,
+          contextLabel: `trajectory positive study ${studyId}`,
+          runQuery: (chunk) =>
+            supabase
+              .from("study_caption_vote_events")
+              .select("id", { count: "exact", head: true })
+              .in("study_caption_mapping_id", chunk)
+              .in("vote_value", ["funny", "very funny"]),
+        }),
+      ]);
+      const ci = computeWilsonConfidenceInterval(positive, exposures);
+      return {
+        flavorId,
+        point: {
+          studyId,
+          studySlug: study.slug,
+          studyLabel: getStudyDisplayLabel(study),
+          exposureMode: resolved.mode,
+          formatLabel: "Likert" as const,
+          captionCount: group.captionIds.size,
+          exposures,
+          positive,
+          rate: ci.rate,
+          ciLow: ci.low,
+          ciHigh: ci.high,
+        },
+      };
     },
   );
 
@@ -2793,10 +3249,12 @@ async function loadUncachedFlavorTrajectoriesBatch(
   for (const flavorId of missingFlavorIds) {
     fetchedByFlavor.set(flavorId, []);
   }
-  for (const entries of perStudyPoints) {
-    for (const { flavorId, point } of entries) {
-      fetchedByFlavor.get(flavorId)?.push(point);
-    }
+  for (const { flavorId, point } of [
+    ...precomputedPoints,
+    ...swipePoints,
+    ...likertPoints,
+  ]) {
+    fetchedByFlavor.get(flavorId)?.push(point);
   }
   const outMap = new Map<number, readonly FlavorCrossStudyPoint[]>();
   for (const flavorId of missingFlavorIds) {
@@ -2811,7 +3269,17 @@ async function loadUncachedFlavorTrajectoriesBatch(
 export async function fetchFlavorCrossStudyTrajectoriesWithClient(
   supabase: SupabaseClient<Database>,
   flavorIds: readonly number[],
-  options?: { nowMs?: number },
+  options?: {
+    nowMs?: number;
+    preverified?: {
+      cacheNamespace: string | null;
+      studies: StudySummaryRow[];
+    };
+    precomputedStudy?: {
+      studyId: number;
+      pointsByFlavorId: ReadonlyMap<number, FlavorCrossStudyPoint>;
+    };
+  },
 ): Promise<Record<number, FlavorCrossStudyPoint[]>> {
   const targetFlavorIds = Array.from(
     new Set(flavorIds.filter((id) => Number.isInteger(id) && id > 0)),
@@ -2820,11 +3288,14 @@ export async function fetchFlavorCrossStudyTrajectoriesWithClient(
     return {};
   }
   const nowMs = options?.nowMs ?? Date.now();
+  const resolveCompletedAtMs = () => options?.nowMs ?? Date.now();
 
-  const [cacheNamespace, studies] = await Promise.all([
-    resolveVerifiedSuperadminCacheNamespace(supabase),
-    fetchStudiesList(supabase),
-  ]);
+  const [cacheNamespace, studies] = options?.preverified
+    ? [options.preverified.cacheNamespace, options.preverified.studies]
+    : await Promise.all([
+        resolveVerifiedSuperadminCacheNamespace(supabase),
+        fetchStudiesList(supabase),
+      ]);
   const visibleStudyIdSet = new Set(studies.map((study) => study.id));
 
   const rawByFlavorId =
@@ -2833,14 +3304,26 @@ export async function fetchFlavorCrossStudyTrajectoriesWithClient(
           namespace: cacheNamespace,
           keys: targetFlavorIds,
           nowMs,
-          resolveCompletedAtMs: () => options?.nowMs ?? Date.now(),
+          resolveCompletedAtMs,
           batchLoader: (batchIds) =>
-            loadUncachedFlavorTrajectoriesBatch(supabase, studies, batchIds),
+            loadUncachedFlavorTrajectoriesBatch(
+              supabase,
+              studies,
+              batchIds,
+              cacheNamespace,
+              nowMs,
+              resolveCompletedAtMs,
+              options?.precomputedStudy,
+            ),
         })
       : await loadUncachedFlavorTrajectoriesBatch(
           supabase,
           studies,
           targetFlavorIds,
+          null,
+          nowMs,
+          resolveCompletedAtMs,
+          options?.precomputedStudy,
         );
 
   const trajectories: Record<number, FlavorCrossStudyPoint[]> = {};
@@ -2854,17 +3337,124 @@ export async function fetchFlavorCrossStudyTrajectoriesWithClient(
   return trajectories;
 }
 
+const sharedHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 2 });
+const sharedHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 6 });
+
+const pooledNodePostgrestFetch: typeof fetch = (input, init) => {
+  const targetUrl =
+    typeof input === "string"
+      ? new URL(input)
+      : input instanceof URL
+        ? input
+        : new URL(input.url);
+  const isHttps = targetUrl.protocol === "https:";
+  const method = init?.method ?? "GET";
+  const mergedHeaders = new Headers(init?.headers);
+  mergedHeaders.set("Connection", "keep-alive");
+  const headerRecord: Record<string, string> = {};
+  mergedHeaders.forEach((value, key) => {
+    headerRecord[key] = value;
+  });
+
+  const requestFn = isHttps ? https.request : http.request;
+  const agent = isHttps ? sharedHttpsAgent : sharedHttpAgent;
+
+  return new Promise<Response>((resolve, reject) => {
+    const req = requestFn(
+      targetUrl,
+      { method, headers: headerRecord, agent },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          const bodyBuffer = Buffer.concat(chunks);
+          const responseHeaders = new Headers();
+          for (const [key, val] of Object.entries(res.headers)) {
+            if (Array.isArray(val)) {
+              for (const item of val) {
+                responseHeaders.append(key, item);
+              }
+            } else if (val !== undefined) {
+              responseHeaders.set(key, val);
+            }
+          }
+          resolve(
+            new Response(method === "HEAD" ? null : bodyBuffer, {
+              status: res.statusCode ?? 200,
+              headers: responseHeaders,
+            }),
+          );
+        });
+      },
+    );
+    req.setTimeout(3000, () => {
+      req.destroy(new Error("socket timed out"));
+    });
+    req.on("error", reject);
+    if (typeof init?.body === "string" || Buffer.isBuffer(init?.body)) {
+      req.write(init.body);
+    }
+    req.end();
+  });
+};
+
+const getRequestScopedSupabaseContext = cache(async () => {
+  const ssrSupabase = await createClient();
+  const sessionResult = await ssrSupabase.auth.getSession();
+  const cacheNamespace =
+    await resolveVerifiedSuperadminCacheNamespace(ssrSupabase);
+  const accessToken = sessionResult.data.session?.access_token;
+  if (cacheNamespace !== null && accessToken) {
+    const { supabaseUrl, supabasePublicKey } = getSupabasePublicEnv();
+    const fastUserClient = createSupabaseJsClient<Database>(
+      supabaseUrl,
+      supabasePublicKey,
+      {
+        accessToken: async () => accessToken,
+        global: {
+          fetch: pooledNodePostgrestFetch,
+        },
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+      },
+    );
+    const studies = await fetchStudiesList(fastUserClient);
+    return {
+      supabase: fastUserClient,
+      ssrSupabase,
+      cacheNamespace,
+      studies,
+    };
+  }
+  const studies = await fetchStudiesList(ssrSupabase);
+  return {
+    supabase: ssrSupabase,
+    ssrSupabase,
+    cacheNamespace,
+    studies,
+  };
+});
+
 export const getCachedTopNavbarMetadata = cache(
   async (): Promise<TopNavbarMetadata> => {
-    const supabase = await createClient();
-    return fetchTopNavbarMetadataWithClient(supabase);
+    const { supabase, cacheNamespace, studies } =
+      await getRequestScopedSupabaseContext();
+    return fetchTopNavbarMetadataWithClient(supabase, undefined, {
+      cacheNamespace,
+      studies,
+    });
   },
 );
 
 export const getCachedExecutiveHubDataset = cache(
   async (): Promise<ExecutiveHubDataset> => {
-    const supabase = await createClient();
-    return fetchExecutiveHubDatasetWithClient(supabase);
+    const { ssrSupabase } = await getRequestScopedSupabaseContext();
+    return fetchExecutiveHubDatasetWithClient(ssrSupabase);
   },
 );
 
@@ -2873,9 +3463,11 @@ export const getCachedStudyAttributionBundle = cache(
     studyId: number,
     excludeHighRisk = false,
   ): Promise<StudyAttributionBundle | null> => {
-    const supabase = await createClient();
+    const { supabase, cacheNamespace, studies } =
+      await getRequestScopedSupabaseContext();
     return fetchStudyAttributionBundleWithClient(supabase, studyId, {
       excludeHighRisk,
+      preverified: { cacheNamespace, studies },
     });
   },
 );
@@ -2888,8 +3480,11 @@ const getCachedFlavorCrossStudyTrajectoriesByKey = cache(
       .split(",")
       .map((part) => Number.parseInt(part, 10))
       .filter((id) => Number.isInteger(id) && id > 0);
-    const supabase = await createClient();
-    return fetchFlavorCrossStudyTrajectoriesWithClient(supabase, flavorIds);
+    const { supabase, cacheNamespace, studies } =
+      await getRequestScopedSupabaseContext();
+    return fetchFlavorCrossStudyTrajectoriesWithClient(supabase, flavorIds, {
+      preverified: { cacheNamespace, studies },
+    });
   },
 );
 
@@ -2903,3 +3498,69 @@ export const getCachedFlavorCrossStudyTrajectories = (
     .join(",");
   return getCachedFlavorCrossStudyTrajectoriesByKey(normalizedKey);
 };
+
+export const getCachedStudyHeadToHeadPageData = cache(
+  async (
+    studyId: number,
+    excludeHighRisk = false,
+  ): Promise<{
+    bundle: StudyAttributionBundle | null;
+    trajectoriesByFlavorId: Record<number, FlavorCrossStudyPoint[]>;
+  }> => {
+    const bundle = await getCachedStudyAttributionBundle(
+      studyId,
+      excludeHighRisk,
+    );
+    if (!bundle) {
+      return { bundle: null, trajectoriesByFlavorId: {} };
+    }
+
+    const flavorIds = bundle.leaderboards.flavors
+      .map((row) => row.flavorId)
+      .filter((id): id is number => id !== null && id > 0);
+    if (flavorIds.length === 0) {
+      return { bundle, trajectoriesByFlavorId: {} };
+    }
+
+    const { supabase, cacheNamespace, studies } =
+      await getRequestScopedSupabaseContext();
+    const precomputedStudy = !excludeHighRisk
+      ? {
+          studyId: bundle.study.id,
+          pointsByFlavorId: new Map<number, FlavorCrossStudyPoint>(
+            bundle.leaderboards.flavors
+              .filter(
+                (row): row is typeof row & { flavorId: number } =>
+                  row.flavorId !== null && row.flavorId > 0,
+              )
+              .map((row) => [
+                row.flavorId,
+                {
+                  studyId: bundle.study.id,
+                  studySlug: bundle.study.slug,
+                  studyLabel: getStudyDisplayLabel(bundle.study),
+                  exposureMode: bundle.exposureBundle.mode,
+                  formatLabel:
+                    bundle.exposureBundle.mode === "swipe_navigation"
+                      ? ("Swipe" as const)
+                      : ("Likert" as const),
+                  captionCount: row.captionCount,
+                  exposures: row.exposures,
+                  positive: row.positive,
+                  rate: row.rate,
+                  ciLow: row.ciLow,
+                  ciHigh: row.ciHigh,
+                },
+              ]),
+          ),
+        }
+      : undefined;
+
+    const trajectoriesByFlavorId =
+      await fetchFlavorCrossStudyTrajectoriesWithClient(supabase, flavorIds, {
+        preverified: { cacheNamespace, studies },
+        precomputedStudy,
+      });
+    return { bundle, trajectoriesByFlavorId };
+  },
+);

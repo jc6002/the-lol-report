@@ -2,11 +2,12 @@
 
 import {
   startTransition as startDeferredTransition,
-  type ChangeEvent,
   useDeferredValue,
   useId,
   useState,
 } from "react";
+
+import { AppSelect } from "@/components/app-select";
 
 import {
   CAPTION_GALLERY_SORT_OPTIONS,
@@ -32,8 +33,7 @@ export function StudyDetailCaptionGallery({
   const isSorting = selectedSort !== deferredSort;
   const isSortDisabled = captionRows.length < 2;
 
-  const handleSortChange = (event: ChangeEvent<HTMLSelectElement>) => {
-    const nextSort = event.target.value;
+  const handleSortValueChange = (nextSort: string) => {
     if (!isCaptionGallerySort(nextSort)) {
       return;
     }
@@ -49,22 +49,20 @@ export function StudyDetailCaptionGallery({
         <h2 className="text-lg font-semibold">Caption Gallery</h2>
         <div className="flex items-end gap-3">
           {isSorting ? <p className="app-muted text-sm">Sorting...</p> : null}
-          <label htmlFor={sortSelectId} className="app-muted space-y-1 text-sm">
-            <span className="block">Sort</span>
-            <select
+          <div className="app-muted space-y-1 text-sm">
+            <label htmlFor={sortSelectId} className="block">
+              Sort
+            </label>
+            <AppSelect
               id={sortSelectId}
+              ariaLabel="Sort captions"
               value={selectedSort}
-              onChange={handleSortChange}
+              options={CAPTION_GALLERY_SORT_OPTIONS}
+              onValueChange={handleSortValueChange}
               disabled={isSortDisabled}
-              className="app-input h-9 min-w-56 rounded-md px-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {CAPTION_GALLERY_SORT_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+              className="min-w-56 rounded-lg text-sm"
+            />
+          </div>
         </div>
       </div>
       <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -74,6 +72,7 @@ export function StudyDetailCaptionGallery({
               <article className="app-card overflow-hidden rounded-xl">
                 {row.image_url ? (
                   <div className="bg-white/40 p-3 dark:bg-slate-950/20">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={row.image_url}
                       alt={row.image_description ?? row.caption_text}

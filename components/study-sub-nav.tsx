@@ -331,7 +331,7 @@ function ClassicReportsMenu({
             ref={menuRef}
             id={menuId}
             role="menu"
-            aria-label="Classic Reports"
+            aria-label="Legacy Views"
             onKeyDown={handleMenuKeyDown}
             className="fixed z-[70] flex flex-col overflow-y-auto rounded-xl border border-slate-200/95 bg-[#fffaf5] p-1.5 text-foreground shadow-2xl outline-none dark:border-cyan-200/20 dark:bg-[#0b1424]"
           >
@@ -371,7 +371,7 @@ function ClassicReportsMenu({
         ref={triggerRef}
         type="button"
         disabled={disabled}
-        aria-label="Open classic study report"
+        aria-label="Open legacy study views"
         aria-haspopup="menu"
         aria-expanded={isOpen}
         aria-controls={isOpen ? menuId : undefined}
@@ -389,12 +389,12 @@ function ClassicReportsMenu({
             setIsOpen(false);
           }
         }}
-        className="app-input inline-flex h-9 w-44 cursor-pointer items-center justify-between gap-2 rounded-lg pl-3 pr-2.5 text-left text-xs font-normal text-foreground outline-none transition disabled:cursor-not-allowed disabled:opacity-60"
+        className="app-button inline-flex h-9 w-auto cursor-pointer items-center justify-between gap-1.5 rounded-lg px-2.5 text-left text-xs font-medium text-foreground outline-none transition disabled:cursor-not-allowed disabled:opacity-60 sm:px-3"
       >
-        <span className="truncate">Classic Reports</span>
+        <span className="truncate">Legacy Views</span>
         <ChevronDown
           aria-hidden="true"
-          className={`app-muted h-4 w-4 shrink-0 transition-transform duration-150 ${
+          className={`app-muted h-3.5 w-3.5 shrink-0 transition-transform duration-150 ${
             isOpen ? "rotate-180 text-foreground" : ""
           }`}
         />
@@ -543,22 +543,22 @@ export function StudySubNav({
         <div className="min-w-0 flex-1">
           <Link
             href="/"
-            className="app-kicker inline-flex items-center gap-1 text-xs font-semibold hover:underline"
+            className="app-kicker inline-flex items-center gap-1 py-1 text-xs font-semibold hover:underline"
           >
             ← Study Hub
           </Link>
 
-          <h1 className="mt-1 min-w-0 break-words text-xl font-semibold tracking-tight sm:text-2xl">
+          <h1 className="mt-0.5 min-w-0 break-words text-xl font-semibold tracking-tight sm:text-2xl">
             {formatStudyHeaderLabel(study)}
           </h1>
 
           <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
             {exposureMode === "swipe_navigation" ? (
-              <span className="inline-flex items-center rounded-md bg-sky-500/14 px-2 py-0.5 text-xs font-medium text-slate-900 ring-1 ring-sky-500/30 dark:text-sky-100">
+              <span className="inline-flex items-center rounded-md bg-sky-500/14 px-2 py-0.5 text-xs font-medium text-slate-900 dark:text-sky-100">
                 Swipe cards · % liked per seen card
               </span>
             ) : (
-              <span className="inline-flex items-center rounded-md bg-amber-500/16 px-2 py-0.5 text-xs font-medium text-amber-900 ring-1 ring-amber-500/30 dark:text-amber-100">
+              <span className="inline-flex items-center rounded-md bg-amber-500/16 px-2 py-0.5 text-xs font-medium text-amber-900 dark:text-amber-100">
                 Rating scale · % rated funny / very funny
               </span>
             )}
@@ -641,7 +641,13 @@ export function StudySubNav({
             const isSelected = tab.id === displayedTab;
             const isLoadingThisTab =
               isTabPending && optimisticTab === tab.id && tab.id !== activeTab;
-            const href = buildStudioTabHref(study.id, tab.id, excludeHighRisk);
+            const activeFlavorParam = searchParams.get("flavor");
+            const href = buildStudioTabHref(
+              study.id,
+              tab.id,
+              excludeHighRisk,
+              activeFlavorParam,
+            );
 
             return (
               <Link
@@ -660,9 +666,19 @@ export function StudySubNav({
                     return;
                   }
                   event.preventDefault();
+                  const liveFlavor =
+                    typeof window !== "undefined"
+                      ? new URLSearchParams(window.location.search).get("flavor")
+                      : activeFlavorParam;
+                  const targetHref = buildStudioTabHref(
+                    study.id,
+                    tab.id,
+                    excludeHighRisk,
+                    liveFlavor,
+                  );
                   setOptimisticTab(tab.id);
                   startTabTransition(() => {
-                    router.push(href);
+                    router.push(targetHref);
                   });
                 }}
                 className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs transition sm:px-3.5 ${

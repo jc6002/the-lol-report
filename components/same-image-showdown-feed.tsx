@@ -33,6 +33,7 @@ import type {
   SameImageCaptionCardMetric,
   SameImageComparisonGroup,
 } from "@/utils/attribution-stats";
+import { formatFriendlyStudyTitle } from "@/utils/attribution-ui-helpers";
 import type { FlavorCrossStudyPoint } from "@/utils/study-lineage-loader";
 
 export type SameImageShowdownFeedProps = {
@@ -51,14 +52,63 @@ export type SameImageShowdownFeedProps = {
   trajectoriesByFlavorId: Record<number, FlavorCrossStudyPoint[]>;
   initialFlavorParam: string | null;
   initialRivalParam: string | null;
+  initialSortParam?: string | null;
   totalExposures?: number;
   studyCaptions?: readonly AttributionSampleCaption[];
 };
 
 type TrajectoryChartPoint = FlavorCrossStudyPoint & {
   studyTag: string;
+  friendlyStudyTitle: string;
+  displayFormatLabel: "Swipe" | "Rating scale";
   ratePct: number | null;
   isCurrentStudy: boolean;
+};
+
+const parseInitialPairSort = (raw?: string | null): PairSortMode => {
+  const normalized = raw?.trim().toLowerCase();
+  if (normalized === "winner" || normalized === "exposures") {
+    return normalized;
+  }
+  return "gap";
+};
+
+const syncHeadToHeadUrlParams = (updates: {
+  flavor?: string | number | null;
+  rival?: string | number | null;
+  sort?: PairSortMode | null;
+}) => {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  if (updates.flavor !== undefined) {
+    if (updates.flavor !== null && String(updates.flavor).length > 0) {
+      params.set("flavor", String(updates.flavor));
+    } else {
+      params.delete("flavor");
+    }
+  }
+  if (updates.rival !== undefined) {
+    if (updates.rival !== null && String(updates.rival).length > 0) {
+      params.set("rival", String(updates.rival));
+    } else {
+      params.delete("rival");
+    }
+  }
+  if (updates.sort !== undefined) {
+    if (updates.sort && updates.sort !== "gap") {
+      params.set("sort", updates.sort);
+    } else {
+      params.delete("sort");
+    }
+  }
+  const nextQuery = params.toString();
+  window.history.replaceState(
+    window.history.state,
+    "",
+    nextQuery
+      ? `${window.location.pathname}?${nextQuery}`
+      : window.location.pathname,
+  );
 };
 
 const PAGE_BATCH_SIZE = 12;
@@ -105,7 +155,9 @@ function TrajectoryTooltip({
 
   return (
     <div className="app-tooltip rounded-xl p-3 text-xs tabular-nums">
-      <p className="font-semibold text-foreground">{point.studyLabel}</p>
+      <p className="font-semibold text-foreground">
+        #{point.studyId} · {point.friendlyStudyTitle}
+      </p>
       <p className="mt-1">
         Positive rate:{" "}
         <span className="font-semibold">{formatStudioRate(point.rate)}</span>
@@ -114,7 +166,8 @@ function TrajectoryTooltip({
           : ""}
       </p>
       <p className="app-muted mt-1">
-        {point.formatLabel} · {point.captionCount.toLocaleString()} caption
+        {point.displayFormatLabel} · {point.captionCount.toLocaleString()}{" "}
+        caption
         {point.captionCount === 1 ? "" : "s"} ·{" "}
         {point.positive.toLocaleString()}/{point.exposures.toLocaleString()}{" "}
         positive
@@ -135,15 +188,28 @@ function TrajectoryDot({
   if (cx === undefined || cy === undefined || !payload) {
     return null;
   }
+  const isSwipe = payload.exposureMode === "swipe_navigation";
   return (
-    <circle
-      cx={cx}
-      cy={cy}
-      r={payload.isCurrentStudy ? 5 : 3.5}
-      fill={payload.isCurrentStudy ? CHART_COLORS.currentDot : CHART_COLORS.line}
-      stroke="#ffffff"
-      strokeWidth={1.5}
-    />
+    <g>
+      {payload.isCurrentStudy ? (
+        <circle
+          cx={cx}
+          cy={cy}
+          r={7}
+          fill="rgba(245, 158, 11, 0.24)"
+          stroke={CHART_COLORS.currentDot}
+          strokeWidth={1.5}
+        />
+      ) : null}
+      <circle
+        cx={cx}
+        cy={cy}
+        r={payload.isCurrentStudy ? 4.2 : 3.8}
+        fill={isSwipe ? CHART_COLORS.line : "#ffffff"}
+        stroke={isSwipe ? "#ffffff" : CHART_COLORS.line}
+        strokeWidth={isSwipe ? 1.5 : 2}
+      />
+    </g>
   );
 }
 
@@ -160,6 +226,23 @@ function FlavorTrajectoryCard({
   excludeHighRisk: boolean;
   isHydrated: boolean;
 }) {
+  const yAxisDomain = useMemo<[number, number]>(() => {
+    const rates = evaluableTrajectoryPoints
+      .map((point) => point.ratePct)
+      .filter((rate): rate is number => rate !== null && Number.isFinite(rate));
+    if (rates.length === 0) {
+      return [0, 100];
+    }
+    const minPct = Math.min(...rates);
+    const maxPct = Math.max(...rates);
+    const domainMin = Math.max(0, Math.floor((minPct - 8) / 5) * 5);
+    const domainMax = Math.min(
+      100,
+      Math.max(domainMin + 10, Math.ceil((maxPct + 8) / 5) * 5),
+    );
+    return [domainMin, domainMax];
+  }, [evaluableTrajectoryPoints]);
+
   return (
     <article className="app-chart-card flex min-w-0 flex-col justify-between gap-3 rounded-xl p-4">
       {focusedFlavor ? (
@@ -168,10 +251,27 @@ function FlavorTrajectoryCard({
             <span className="min-w-0 break-words font-mono text-sm font-semibold text-foreground">
               {focusedFlavor.label}
             </span>
-            <span className="app-muted shrink-0 text-xs tabular-nums">
-              {focusedTrajectory.length.toLocaleString()} study run
-              {focusedTrajectory.length === 1 ? "" : "s"}
-            </span>
+            <div className="app-muted flex flex-wrap items-center gap-2.5 text-[11px] tabular-nums">
+              {evaluableTrajectoryPoints.length >= 2 ? (
+                <span
+                  aria-hidden="true"
+                  className="inline-flex items-center gap-2"
+                >
+                  <span className="inline-flex items-center gap-1">
+                    <span className="h-2 w-2 rounded-full bg-teal-600" />
+                    Swipe
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="h-2 w-2 rounded-full border-2 border-teal-600 bg-white dark:bg-slate-950" />
+                    Rating scale
+                  </span>
+                </span>
+              ) : null}
+              <span>
+                {focusedTrajectory.length.toLocaleString()} study run
+                {focusedTrajectory.length === 1 ? "" : "s"}
+              </span>
+            </div>
           </div>
 
           {evaluableTrajectoryPoints.length >= 2 ? (
@@ -201,7 +301,7 @@ function FlavorTrajectoryCard({
                       stroke={CHART_COLORS.axis}
                       tick={{ fontSize: 11 }}
                       tickFormatter={(value) => `${value}%`}
-                      domain={[0, 100]}
+                      domain={yAxisDomain}
                     />
                     <Tooltip content={<TrajectoryTooltip />} />
                     <Line
@@ -252,11 +352,11 @@ function FlavorTrajectoryCard({
                       <span className="app-muted mr-1.5 font-mono">
                         #{point.studyId}
                       </span>
-                      <span>{point.studySlug ?? point.studyLabel}</span>
+                      <span>{point.friendlyStudyTitle}</span>
                     </span>
                     <span className="flex shrink-0 items-center gap-2 tabular-nums">
                       <span className="app-muted">
-                        {point.formatLabel} · {point.captionCount} cap
+                        {point.displayFormatLabel} · {point.captionCount} cap
                       </span>
                       <span className="min-w-12 text-right font-semibold text-foreground">
                         {formatStudioRate(point.rate)}
@@ -440,6 +540,7 @@ export function SameImageShowdownFeed({
   trajectoriesByFlavorId,
   initialFlavorParam,
   initialRivalParam,
+  initialSortParam,
   totalExposures,
   studyCaptions = [],
 }: SameImageShowdownFeedProps) {
@@ -572,7 +673,9 @@ export function SameImageShowdownFeed({
       ? matchedInitialRival.key
       : "all",
   );
-  const [pairSort, setPairSort] = useState<PairSortMode>("gap");
+  const [pairSort, setPairSort] = useState<PairSortMode>(() =>
+    parseInitialPairSort(initialSortParam),
+  );
   const [visibleCount, setVisibleCount] = useState<number>(PAGE_BATCH_SIZE);
   const [expandedImageIds, setExpandedImageIds] = useState<Set<string>>(
     () => new Set(),
@@ -583,6 +686,13 @@ export function SameImageShowdownFeed({
   const [brokenSampleCaptionIds, setBrokenSampleCaptionIds] = useState<
     Set<string>
   >(() => new Set());
+
+  const resolveFlavorUrlToken = (flavorKey: string): string | number | null => {
+    if (!flavorKey || flavorKey === "all") return null;
+    const matched = flavorRows.find((row) => row.key === flavorKey);
+    if (!matched) return null;
+    return matched.flavorId ?? matched.label;
+  };
 
   const focusedFlavor =
     attributedFlavors.find((row) => row.flavorId === focusedFlavorId) ??
@@ -598,6 +708,13 @@ export function SameImageShowdownFeed({
     return raw.map((point) => ({
       ...point,
       studyTag: `#${point.studyId}`,
+      friendlyStudyTitle: formatFriendlyStudyTitle({
+        id: point.studyId,
+        slug: point.studySlug,
+        description: point.studyLabel,
+      }),
+      displayFormatLabel:
+        point.exposureMode === "swipe_navigation" ? "Swipe" : "Rating scale",
       ratePct:
         point.rate === null ? null : Number((point.rate * 100).toFixed(2)),
       isCurrentStudy: point.studyId === studyId,
@@ -702,6 +819,7 @@ export function SameImageShowdownFeed({
   const handleSelectFlavorRow = (row: AttributionLeaderboardRow) => {
     if (row.flavorId !== null) {
       setFocusedFlavorId(row.flavorId);
+      syncHeadToHeadUrlParams({ flavor: row.flavorId });
     }
     if (sharedFlavorKeySet.has(row.key)) {
       setFlavorA(row.key);
@@ -870,9 +988,9 @@ export function SameImageShowdownFeed({
         </div>
 
         {!isZeroVoteStagingStudy ? (
-          <section className="grid gap-3 tabular-nums sm:grid-cols-2 xl:grid-cols-4">
-            <article className="app-card app-stat-card-teal flex min-w-0 flex-col rounded-xl p-4">
-              <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+          <section className="grid grid-cols-2 gap-2.5 tabular-nums sm:gap-3 xl:grid-cols-4">
+            <article className="app-card app-stat-card-teal flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+              <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                 {soleFlavor
                   ? "Prompt Flavor"
                   : attributedFlavors.length >= 2
@@ -881,15 +999,15 @@ export function SameImageShowdownFeed({
               </p>
               {soleFlavor ? (
                 <>
-                  <div className="mt-2 flex min-h-8 min-w-0 items-center">
+                  <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
                     <p
                       title={soleFlavor.label}
-                      className="truncate font-mono text-sm leading-5 font-semibold sm:text-base sm:leading-6 xl:text-sm xl:leading-5"
+                      className="truncate font-mono text-xs leading-5 font-semibold sm:text-base sm:leading-6 xl:text-sm xl:leading-5"
                     >
                       {soleFlavor.label}
                     </p>
                   </div>
-                  <p className="app-muted mt-1.5 text-xs leading-5">
+                  <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                     {soleFlavor.dominantModelLabel ?? "Unattributed"} ·{" "}
                     {soleFlavor.captionCount.toLocaleString()}{" "}
                     {soleFlavor.captionCount === 1 ? "caption" : "captions"}
@@ -897,88 +1015,88 @@ export function SameImageShowdownFeed({
                 </>
               ) : attributedFlavors.length >= 2 ? (
                 <>
-                  <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                    <p className="truncate text-2xl leading-8 font-semibold">
+                  <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                    <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
                       {attributedFlavors.length.toLocaleString()} flavors
                     </p>
                   </div>
-                  <p className="app-muted mt-1.5 text-xs leading-5">
+                  <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                     {resolvedTotalCaptions.toLocaleString()} captions across
                     separate images
                   </p>
                 </>
               ) : (
                 <>
-                  <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                    <p className="truncate text-2xl leading-8 font-semibold">
+                  <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                    <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
                       {resolvedTotalCaptions.toLocaleString()}
                     </p>
                   </div>
-                  <p className="app-muted mt-1.5 text-xs leading-5">
+                  <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                     Manual study deck
                   </p>
                 </>
               )}
             </article>
 
-            <article className="app-card app-stat-card-sky flex min-w-0 flex-col rounded-xl p-4">
-              <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+            <article className="app-card app-stat-card-sky flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+              <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                 Positive Rate
               </p>
-              <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                <p className="truncate text-2xl leading-8 font-semibold">
+              <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
                   {formatStudioRate(studyPositiveRate)}
                 </p>
               </div>
-              <p className="app-muted mt-1.5 text-xs leading-5">
+              <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                 {resolvedTotalPositive.toLocaleString()} /{" "}
                 {resolvedTotalExposures.toLocaleString()} {exposureUnitLabel}
               </p>
             </article>
 
-            <article className="app-card app-stat-card-amber flex min-w-0 flex-col rounded-xl p-4">
-              <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+            <article className="app-card app-stat-card-amber flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+              <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                 Deck Caption Spread
               </p>
-              <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                <p className="truncate text-2xl leading-8 font-semibold">
+              <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
                   {resolvedStudySamples.spreadPp === null
                     ? "—"
                     : `+${resolvedStudySamples.spreadPp.toFixed(1)} pp`}
                 </p>
               </div>
-              <p className="app-muted mt-1.5 text-xs leading-5">
+              <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                 Best vs. lowest rated caption in study
               </p>
             </article>
 
-            <article className="app-card app-stat-card-rose flex min-w-0 flex-col rounded-xl p-4">
-              <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+            <article className="app-card app-stat-card-rose flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+              <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                 Cross-Study History
               </p>
               {focusedFlavor ? (
                 <>
-                  <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                    <p className="truncate text-2xl leading-8 font-semibold">
+                  <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                    <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
                       {focusedTrajectory.length.toLocaleString()}{" "}
                       {focusedTrajectory.length === 1 ? "study" : "studies"}
                     </p>
                   </div>
                   <p
                     title={focusedFlavor.label}
-                    className="app-muted mt-1.5 truncate font-mono text-xs leading-5"
+                    className="app-muted mt-1 truncate font-mono text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5"
                   >
                     {focusedFlavor.label}
                   </p>
                 </>
               ) : (
                 <>
-                  <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                    <p className="truncate text-2xl leading-8 font-semibold">
+                  <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                    <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
                       —
                     </p>
                   </div>
-                  <p className="app-muted mt-1.5 text-xs leading-5">
+                  <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                     Manual entries only
                   </p>
                 </>
@@ -1132,38 +1250,38 @@ export function SameImageShowdownFeed({
         </div>
       ) : null}
 
-      <section className="grid gap-3 tabular-nums sm:grid-cols-2 xl:grid-cols-4">
-        <article className="app-card app-stat-card-teal flex min-w-0 flex-col rounded-xl p-4">
-          <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+      <section className="grid grid-cols-2 gap-2.5 tabular-nums sm:gap-3 xl:grid-cols-4">
+        <article className="app-card app-stat-card-teal flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+          <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
             Shared Images
           </p>
-          <div className="mt-2 flex min-h-8 min-w-0 items-center">
-            <p className="truncate text-2xl leading-8 font-semibold">
+          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+            <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
               {headToHead.crossFlavorSharedImageCount.toLocaleString()}
             </p>
           </div>
-          <p className="app-muted mt-1.5 text-xs leading-5">
+          <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
             {headToHead.comparableCaptionCount.toLocaleString()} caption
             {headToHead.comparableCaptionCount === 1 ? "" : "s"} competing on
             identical prompts
           </p>
         </article>
 
-        <article className="app-card app-stat-card-sky flex min-w-0 flex-col rounded-xl p-4">
-          <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+        <article className="app-card app-stat-card-sky flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+          <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
             Top Same-Image Lift
           </p>
           {topLiftFlavor ? (
             <>
-              <div className="mt-2 flex min-h-8 min-w-0 items-center">
+              <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
                 <p
                   title={topLiftFlavor.label}
-                  className="truncate font-mono text-sm leading-5 font-semibold sm:text-base sm:leading-6 xl:text-sm xl:leading-5"
+                  className="truncate font-mono text-xs leading-5 font-semibold sm:text-base sm:leading-6 xl:text-sm xl:leading-5"
                 >
                   {topLiftFlavor.label}
                 </p>
               </div>
-              <p className="app-muted mt-1.5 text-xs leading-5">
+              <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                 {formatSignedPp(topLiftFlavor.meanLiftPp)} across{" "}
                 {topLiftFlavor.sharedImageCount.toLocaleString()} image
                 {topLiftFlavor.sharedImageCount === 1 ? "" : "s"}
@@ -1171,57 +1289,61 @@ export function SameImageShowdownFeed({
             </>
           ) : (
             <>
-              <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                <p className="truncate text-2xl leading-8 font-semibold">—</p>
+              <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
+                  —
+                </p>
               </div>
-              <p className="app-muted mt-1.5 text-xs leading-5">
+              <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                 No evaluated cross-flavor image pairs
               </p>
             </>
           )}
         </article>
 
-        <article className="app-card app-stat-card-amber flex min-w-0 flex-col rounded-xl p-4">
-          <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+        <article className="app-card app-stat-card-amber flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+          <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
             Widest Single-Image Gap
           </p>
-          <div className="mt-2 flex min-h-8 min-w-0 items-center">
-            <p className="truncate text-2xl leading-8 font-semibold">
+          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+            <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
               {headToHead.maxImageSpreadPp === null
                 ? "—"
                 : `+${headToHead.maxImageSpreadPp.toFixed(1)} pp`}
             </p>
           </div>
-          <p className="app-muted mt-1.5 text-xs leading-5">
+          <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
             Best vs. lowest punchline on same image
           </p>
         </article>
 
-        <article className="app-card app-stat-card-rose flex min-w-0 flex-col rounded-xl p-4">
-          <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+        <article className="app-card app-stat-card-rose flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+          <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
             Cross-Study History
           </p>
           {focusedFlavor ? (
             <>
-              <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                <p className="truncate text-2xl leading-8 font-semibold">
+              <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
                   {focusedTrajectory.length.toLocaleString()}{" "}
                   {focusedTrajectory.length === 1 ? "study" : "studies"}
                 </p>
               </div>
               <p
                 title={focusedFlavor.label}
-                className="app-muted mt-1.5 truncate font-mono text-xs leading-5"
+                className="app-muted mt-1 truncate font-mono text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5"
               >
                 {focusedFlavor.label}
               </p>
             </>
           ) : (
             <>
-              <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                <p className="truncate text-2xl leading-8 font-semibold">—</p>
+              <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                <p className="truncate text-xl leading-7 font-semibold sm:text-2xl sm:leading-8">
+                  —
+                </p>
               </div>
-              <p className="app-muted mt-1.5 text-xs leading-5">
+              <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                 No attributed prompt flavors in study
               </p>
             </>
@@ -1230,8 +1352,72 @@ export function SameImageShowdownFeed({
       </section>
 
       {sortedLiftRows.length > 0 ? (
-        <section className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
-          <div className="app-table-shell min-w-0 overflow-x-auto rounded-xl">
+        <section className="grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
+          {/* Mobile < md stacked cards */}
+          <div className="min-w-0 space-y-2.5 md:hidden">
+            {sortedLiftRows.map((row) => {
+              const isFocused =
+                !row.isUnattributed &&
+                focusedFlavor?.flavorId !== null &&
+                row.flavorId === focusedFlavor?.flavorId;
+              return (
+                <article
+                  key={row.key}
+                  className={`app-card min-w-0 rounded-xl p-3.5 tabular-nums ${
+                    isFocused
+                      ? "ring-2 ring-sky-500/50 dark:ring-cyan-300/45"
+                      : ""
+                  }`}
+                >
+                  <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      {row.isUnattributed ? (
+                        <p className="font-semibold text-foreground">
+                          {row.label}
+                        </p>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleSelectFlavorRow(row)}
+                          className="block max-w-full cursor-pointer text-left focus-visible:outline-none focus-visible:underline"
+                        >
+                          <span className="block break-words font-mono text-sm font-semibold text-foreground">
+                            {row.label}
+                          </span>
+                        </button>
+                      )}
+                      <p className="app-muted mt-0.5 text-xs">
+                        {row.dominantModelLabel ?? "Unattributed"} ·{" "}
+                        {row.sharedImageCount === 0
+                          ? "0 shared imgs"
+                          : `${row.sharedImageCount.toLocaleString()} shared imgs`}
+                      </p>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <p
+                        className={`text-sm font-semibold ${getLiftToneClassName(row.meanLiftPp)}`}
+                      >
+                        {formatSignedPp(row.meanLiftPp)} lift
+                      </p>
+                      <p className="app-muted text-xs">
+                        {formatStudioRate(row.rate)} vs{" "}
+                        {formatStudioRate(row.imageBaselineMean)} base
+                      </p>
+                    </div>
+                  </div>
+                  {row.pairWinRate !== null ? (
+                    <p className="app-muted mt-1.5 text-xs">
+                      Pairwise: {row.pairWins}W–{row.pairLosses}L–{row.pairTies}T
+                      ({formatStudioRate(row.pairWinRate)})
+                    </p>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+
+          {/* Desktop >= md sortable table */}
+          <div className="app-table-shell hidden min-w-0 overflow-x-auto rounded-xl md:block">
             <table className="app-table min-w-full divide-y divide-slate-200/60 text-sm dark:divide-slate-700/60">
               <thead>
                 <tr>
@@ -1395,6 +1581,15 @@ export function SameImageShowdownFeed({
                 onValueChange={(nextValue) => {
                   setFlavorA(nextValue);
                   setVisibleCount(PAGE_BATCH_SIZE);
+                  const matched = flavorRows.find(
+                    (row) => row.key === nextValue,
+                  );
+                  if (matched?.flavorId !== null && matched?.flavorId !== undefined) {
+                    setFocusedFlavorId(matched.flavorId);
+                  }
+                  syncHeadToHeadUrlParams({
+                    flavor: resolveFlavorUrlToken(nextValue),
+                  });
                 }}
                 menuMinWidthPx={220}
                 menuMaxWidthPx={360}
@@ -1415,6 +1610,9 @@ export function SameImageShowdownFeed({
                 onValueChange={(nextValue) => {
                   setFlavorB(nextValue);
                   setVisibleCount(PAGE_BATCH_SIZE);
+                  syncHeadToHeadUrlParams({
+                    rival: resolveFlavorUrlToken(nextValue),
+                  });
                 }}
                 menuMinWidthPx={220}
                 menuMaxWidthPx={360}
@@ -1432,7 +1630,10 @@ export function SameImageShowdownFeed({
                 ariaLabel="Sort shared image pairs"
                 options={PAIR_SORT_OPTIONS}
                 value={pairSort}
-                onValueChange={setPairSort}
+                onValueChange={(nextSort) => {
+                  setPairSort(nextSort);
+                  syncHeadToHeadUrlParams({ sort: nextSort });
+                }}
                 menuMinWidthPx={190}
                 className="w-full max-w-full rounded-lg text-sm sm:w-44"
               />
@@ -1445,6 +1646,7 @@ export function SameImageShowdownFeed({
                   setFlavorA("all");
                   setFlavorB("all");
                   setVisibleCount(PAGE_BATCH_SIZE);
+                  syncHeadToHeadUrlParams({ flavor: null, rival: null });
                 }}
                 className="app-button h-9 cursor-pointer rounded-lg px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
               >
@@ -1574,6 +1776,7 @@ export function SameImageShowdownFeed({
                 setFlavorA("all");
                 setFlavorB("all");
                 setVisibleCount(PAGE_BATCH_SIZE);
+                syncHeadToHeadUrlParams({ flavor: null, rival: null });
               }}
               className="app-button inline-flex h-9 cursor-pointer items-center rounded-lg px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
             >

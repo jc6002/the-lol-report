@@ -719,6 +719,40 @@ describe("attribution-export", () => {
       ),
       "",
     );
+    assert.equal(
+      getCohortRowVoterSubtitle(
+        {
+          rowKey: "r6",
+          rowKind: "answer",
+          answerId: 1,
+          label: "Yes",
+          pooledOptionCount: 0,
+          distinctVoters: 11,
+          overallCell: { status: "empty" },
+          cellsByFlavorKey: {},
+        },
+        false,
+        { coarsenVoterCounts: true, hideUnsurveyedCount: true },
+      ),
+      "n≥5 voters",
+    );
+    assert.equal(
+      getCohortRowVoterSubtitle(
+        {
+          rowKey: "r7",
+          rowKind: "unsurveyed",
+          answerId: null,
+          label: "No survey response on file",
+          pooledOptionCount: 0,
+          distinctVoters: 150,
+          overallCell: { status: "empty" },
+          cellsByFlavorKey: {},
+        },
+        false,
+        { coarsenVoterCounts: false, hideUnsurveyedCount: true },
+      ),
+      "",
+    );
 
     assert.deepEqual(formatSurveyedVoterSummary(0, 0), {
       primary: "0 / 0",
@@ -1072,5 +1106,29 @@ describe("attribution-export", () => {
     assert.equal(sortedByWinner[0].group.imageId, "img-a");
     const sortedByExp = sortResolvedGroupPairs([fbAll!, allPair!], "exposures");
     assert.equal(sortedByExp[0].group.imageId, "img-a");
+  });
+
+  it("coarsens 1..4 unsurveyed or question-skipping headcounts to prevent subtraction leaks", () => {
+    // 164 surveyed out of 167 total -> 3 unsurveyed (< 5) -> coarsened to >= 163 / 167
+    const coarsened = formatSurveyedVoterSummary(164, 167);
+    assert.equal(coarsened.primary, "≥ 163 / 167");
+    assert.match(coarsened.subtitle, /< 5 unsurveyed masked/);
+
+    // 160 surveyed out of 167 total -> 7 unsurveyed (>= 5) -> exact 160 / 167 safe
+    const exact = formatSurveyedVoterSummary(160, 167);
+    assert.equal(exact.primary, "160 / 167");
+
+    // 16 respondents out of 18 surveyed study voters -> 2 skipped (< 5) -> coarsened to n≥14
+    const skippedQ = formatQuestionRespondentLabel({
+      questionId: 9,
+      questionText: "Major?",
+      surveyedRespondentCount: 16,
+      studySurveyedVoterCount: 18,
+      unsurveyedVoterCount: 149,
+      visibleSegmentCount: 2,
+      maskedSegmentCount: 0,
+      rows: [],
+    });
+    assert.equal(skippedQ, "n≥14");
   });
 });

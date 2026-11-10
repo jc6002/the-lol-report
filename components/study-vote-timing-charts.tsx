@@ -50,8 +50,40 @@ type StudyVoteTimingChartsProps = {
 const COLORS = {
   grid: "rgba(148, 163, 184, 0.28)",
   axis: "#64748b",
-  reference: "#22d3ee",
-  line: "#ec4899",
+  reference: "#0284c7",
+  line: "#4f46e5",
+};
+
+const utcDateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  timeZone: "UTC",
+  timeZoneName: "short",
+});
+
+const formatReadableUtcTimestamp = (rawIso: string): string => {
+  const parsed = Date.parse(rawIso);
+  if (!Number.isFinite(parsed)) {
+    return rawIso;
+  }
+  return utcDateTimeFormatter.format(new Date(parsed));
+};
+
+const formatReadableStartSource = (rawSource: string): string => {
+  const normalized = rawSource.trim().toLowerCase();
+  if (normalized.includes("start_datetime")) {
+    return "scheduled start";
+  }
+  if (normalized.includes("created_datetime")) {
+    return "study created";
+  }
+  if (normalized.includes("first_vote")) {
+    return "first recorded vote";
+  }
+  return rawSource.replace(/_/g, " ");
 };
 
 const toNumeric = (value: unknown) => {
@@ -107,8 +139,12 @@ const VoteTimingTooltip = ({
       <p>
         Avg gap: {formatDuration(row.average_minutes_between_votes)}
       </p>
-      <p className="app-muted mt-2">First: {row.first_vote_at_utc}</p>
-      <p className="app-muted">Last: {row.last_vote_at_utc}</p>
+      <p className="app-muted mt-2">
+        First: {formatReadableUtcTimestamp(row.first_vote_at_utc)}
+      </p>
+      <p className="app-muted">
+        Last: {formatReadableUtcTimestamp(row.last_vote_at_utc)}
+      </p>
     </div>
   );
 };
@@ -190,7 +226,9 @@ export function StudyVoteTimingCharts({ charts }: StudyVoteTimingChartsProps) {
                   </p>
                 </div>
                 <p className="app-muted text-xs">
-                  Start clock: {chart.study_started_at_utc} ({chart.study_start_source})
+                  Start clock:{" "}
+                  {formatReadableUtcTimestamp(chart.study_started_at_utc)} (
+                  {formatReadableStartSource(chart.study_start_source)})
                 </p>
               </div>
               <p className="app-muted text-xs">

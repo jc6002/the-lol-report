@@ -8,10 +8,18 @@ import {
   type SameImageComparisonGroup,
 } from "@/utils/attribution-stats";
 import { formatDurationFromMinutes } from "@/utils/format-duration";
+import {
+  buildStudyPdfReportData,
+  type StudyPdfReportData,
+} from "@/utils/pdf-report-builder";
 import type { StudyAttributionBundle } from "@/utils/study-lineage-loader";
+
+export type { StudyPdfReportData };
 
 export type StudyExportPayload = {
   studyId: number;
+  pdfFilename: string;
+  pdfReport: StudyPdfReportData;
   csvFilename: string;
   csvContent: string;
   briefFilename: string;
@@ -146,7 +154,7 @@ export function hasSuppressedCohortPool(
 }
 
 /**
- * Formats the respondent count badge for a survey question in `<select>` controls
+ * Formats the respondent count badge for a survey question in dropdown controls
  * without exposing direct `1..4` counts or allowing subtraction against visible
  * answer rows (`surveyedRespondentCount - sum(visibleAnswerRows)`).
  */
@@ -167,6 +175,34 @@ export function formatQuestionRespondentLabel(
     );
     return `n≥${disclosedVoters.toLocaleString()}`;
   }
+  const studyTotal =
+    question.surveyedRespondentCount + question.unsurveyedVoterCount;
+  const hasSmallUnsurveyed =
+    question.unsurveyedVoterCount > 0 &&
+    question.unsurveyedVoterCount < MIN_COHORT_VOTERS;
+  const skippedSurveyed =
+    question.studySurveyedVoterCount !== undefined
+      ? question.studySurveyedVoterCount - question.surveyedRespondentCount
+      : 0;
+  const hasSmallSkippedSurveyed =
+    skippedSurveyed > 0 && skippedSurveyed < MIN_COHORT_VOTERS;
+  if (hasSmallUnsurveyed || hasSmallSkippedSurveyed) {
+    const bounds: number[] = [MIN_COHORT_VOTERS];
+    if (hasSmallUnsurveyed) {
+      bounds.push(studyTotal - (MIN_COHORT_VOTERS - 1));
+    }
+    if (
+      hasSmallSkippedSurveyed &&
+      question.studySurveyedVoterCount !== undefined
+    ) {
+      bounds.push(question.studySurveyedVoterCount - (MIN_COHORT_VOTERS - 1));
+    }
+    const lowerBound = Math.min(
+      question.surveyedRespondentCount,
+      Math.max(...bounds),
+    );
+    return `n≥${lowerBound.toLocaleString()}`;
+  }
   return `n=${question.surveyedRespondentCount.toLocaleString()}`;
 }
 
@@ -184,6 +220,23 @@ export function formatSurveyedVoterSummary(
       subtitle: `${total.toLocaleString()} study voter${total === 1 ? "" : "s"} · masked below k ≥ ${MIN_COHORT_VOTERS}`,
     };
   }
+  const unsurveyed = total - surveyed;
+  if (
+    surveyed >= MIN_COHORT_VOTERS &&
+    unsurveyed > 0 &&
+    unsurveyed < MIN_COHORT_VOTERS
+  ) {
+    const lowerBound = Math.min(
+      surveyed,
+      Math.max(MIN_COHORT_VOTERS, total - (MIN_COHORT_VOTERS - 1)),
+    );
+    const floorPct =
+      total > 0 ? ((lowerBound / total) * 100).toFixed(1) : "—";
+    return {
+      primary: `≥ ${lowerBound.toLocaleString()} / ${total.toLocaleString()}`,
+      subtitle: `≥ ${floorPct}% with demographic responses · < ${MIN_COHORT_VOTERS} unsurveyed masked`,
+    };
+  }
   const coverageText =
     total > 0 ? `${((surveyed / total) * 100).toFixed(1)}%` : "—";
   return {
@@ -195,19 +248,32 @@ export function formatSurveyedVoterSummary(
 export function getCohortRowVoterSubtitle(
   row: DemographicCohortRow,
   hasSuppressedMaskedPool = false,
+  options?: {
+    coarsenVoterCounts?: boolean;
+    hideUnsurveyedCount?: boolean;
+  },
 ): string {
+  const coarsen = Boolean(options?.coarsenVoterCounts);
+  const hideUnsurv =
+    hasSuppressedMaskedPool || Boolean(options?.hideUnsurveyedCount) || coarsen;
   if (row.rowKind === "masked_pool") {
     const optionLabel = `${row.pooledOptionCount} option${row.pooledOptionCount === 1 ? "" : "s"}`;
     if (row.distinctVoters === null) {
       return optionLabel;
     }
+    if (coarsen) {
+      return `${optionLabel} · n≥${MIN_COHORT_VOTERS} voters`;
+    }
     return `${optionLabel} · n=${row.distinctVoters.toLocaleString()} voters`;
   }
-  if (row.rowKind === "unsurveyed" && hasSuppressedMaskedPool) {
+  if (row.rowKind === "unsurveyed" && hideUnsurv) {
     return "";
   }
   if (row.distinctVoters === null) {
     return "";
+  }
+  if (coarsen) {
+    return `n≥${MIN_COHORT_VOTERS} voters`;
   }
   return `n=${row.distinctVoters.toLocaleString()} voters`;
 }
@@ -440,6 +506,14 @@ export function sortResolvedGroupPairs(
   pairs: readonly ResolvedGroupPair[],
   pairSort: PairSortMode,
 ): ResolvedGroupPair[] {
+  const isReliablePair = (pair: ResolvedGroupPair): number =>
+    pair.leftCard.rate !== null &&
+    pair.rightCard.rate !== null &&
+    Math.min(pair.leftCard.exposures, pair.rightCard.exposures) >=
+      MIN_COHORT_VOTERS
+      ? 1
+      : 0;
+
   return [...pairs].sort((left, right) => {
     if (pairSort === "winner") {
       if (left.winnerRate !== right.winnerRate) {
@@ -450,6 +524,11 @@ export function sortResolvedGroupPairs(
         return right.group.totalExposures - left.group.totalExposures;
       }
     } else {
+      const leftReliable = isReliablePair(left);
+      const rightReliable = isReliablePair(right);
+      if (leftReliable !== rightReliable) {
+        return rightReliable - leftReliable;
+      }
       const leftGap = left.pairSpreadPp ?? -1;
       const rightGap = right.pairSpreadPp ?? -1;
       if (leftGap !== rightGap) {
@@ -514,6 +593,15 @@ export function encodeCsvCell(
     return `"${sanitized.replace(/"/g, '""')}"`;
   }
   return sanitized;
+}
+
+export function getStudyAttributionPdfFilename(
+  studyId: number,
+  excludeHighRisk = false,
+): string {
+  return excludeHighRisk
+    ? `study-${studyId}-attribution-report-clean-raters.pdf`
+    : `study-${studyId}-attribution-report.pdf`;
 }
 
 export function getStudyAttributionCsvFilename(studyId: number): string {
@@ -609,8 +697,15 @@ const formatLeaderboardBriefRow = (row: AttributionLeaderboardRow): string => {
   return `| \`${escapeMarkdownInline(row.label)}\` | ${escapeMarkdownInline(modelCell)} | ${row.captionCount.toLocaleString()} | ${row.exposures.toLocaleString()} | ${rateCell} | ${formatSignedPp(row.meanLiftPp)} | ${formatChainSeconds(row.medianChainSeconds)} |`;
 };
 
-const formatTasteGapBriefRow = (gap: CohortTasteGapRow): string =>
-  `| \`${escapeMarkdownInline(gap.flavorSlug)}\` | ${escapeMarkdownInline(gap.questionText)} | ${escapeMarkdownInline(gap.highAnswerLabel)} (${formatStudioRate(gap.highRate)}, n=${gap.highVoters}) | ${escapeMarkdownInline(gap.lowAnswerLabel)} (${formatStudioRate(gap.lowRate)}, n=${gap.lowVoters}) | +${gap.spreadPp.toFixed(1)} pp |`;
+const formatTasteGapBriefRow = (gap: CohortTasteGapRow): string => {
+  const highCount = gap.coarsenVoters
+    ? `n>=${MIN_COHORT_VOTERS}`
+    : `n=${gap.highVoters}`;
+  const lowCount = gap.coarsenVoters
+    ? `n>=${MIN_COHORT_VOTERS}`
+    : `n=${gap.lowVoters}`;
+  return `| \`${escapeMarkdownInline(gap.flavorSlug)}\` | ${escapeMarkdownInline(gap.questionText)} | ${escapeMarkdownInline(gap.highAnswerLabel)} (${formatStudioRate(gap.highRate)}, ${highCount}) | ${escapeMarkdownInline(gap.lowAnswerLabel)} (${formatStudioRate(gap.lowRate)}, ${lowCount}) | +${gap.spreadPp.toFixed(1)} pp |`;
+};
 
 const pickGroupEndpointPair = (
   group: SameImageComparisonGroup,
@@ -685,7 +780,21 @@ export function buildStudyResearchBriefMarkdown(
     bundle.demographics.surveyedVoterCount > 0 &&
     bundle.demographics.surveyedVoterCount < MIN_COHORT_VOTERS
       ? `- **Surveyed voters:** Masked (< ${MIN_COHORT_VOTERS} surveyed across ${bundle.demographics.studyVoterCount.toLocaleString()} study voter${bundle.demographics.studyVoterCount === 1 ? "" : "s"})`
-      : `- **Surveyed voters:** ${bundle.demographics.surveyedVoterCount.toLocaleString()} of ${bundle.demographics.studyVoterCount.toLocaleString()} study voters have demographic responses on file`,
+      : bundle.demographics.surveyedVoterCount >= MIN_COHORT_VOTERS &&
+          bundle.demographics.studyVoterCount -
+            bundle.demographics.surveyedVoterCount >
+            0 &&
+          bundle.demographics.studyVoterCount -
+            bundle.demographics.surveyedVoterCount <
+            MIN_COHORT_VOTERS
+        ? `- **Surveyed voters:** ≥ ${Math.min(
+            bundle.demographics.surveyedVoterCount,
+            Math.max(
+              MIN_COHORT_VOTERS,
+              bundle.demographics.studyVoterCount - (MIN_COHORT_VOTERS - 1),
+            ),
+          ).toLocaleString()} of ${bundle.demographics.studyVoterCount.toLocaleString()} study voters have demographic responses on file (< ${MIN_COHORT_VOTERS} unsurveyed masked)`
+        : `- **Surveyed voters:** ${bundle.demographics.surveyedVoterCount.toLocaleString()} of ${bundle.demographics.studyVoterCount.toLocaleString()} study voters have demographic responses on file`,
     "",
     "## Prompt Flavor Empirical Leaderboard",
     "",
@@ -735,14 +844,38 @@ export function buildStudyResearchBriefMarkdown(
 
   const topPairs = bundle.headToHead.groups
     .filter((group) => group.spreadPp !== null)
-    .map((group) => ({ group, pair: pickGroupEndpointPair(group) }))
+    .map((group) => {
+      const pair = pickGroupEndpointPair(group);
+      if (!pair) {
+        return null;
+      }
+      const pairSpreadPp = Math.max(
+        0,
+        ((pair.winner.rate ?? 0) - (pair.flop.rate ?? 0)) * 100,
+      );
+      const isReliable =
+        Math.min(pair.winner.exposures, pair.flop.exposures) >=
+        MIN_COHORT_VOTERS
+          ? 1
+          : 0;
+      return { group, pair, pairSpreadPp, isReliable };
+    })
     .filter(
       (
         entry,
       ): entry is {
         group: SameImageComparisonGroup;
         pair: NonNullable<ReturnType<typeof pickGroupEndpointPair>>;
-      } => entry.pair !== null,
+        pairSpreadPp: number;
+        isReliable: number;
+      } => entry !== null,
+    )
+    .sort(
+      (a, b) =>
+        b.isReliable - a.isReliable ||
+        b.pairSpreadPp - a.pairSpreadPp ||
+        b.group.totalExposures - a.group.totalExposures ||
+        a.group.imageId.localeCompare(b.group.imageId),
     )
     .slice(0, 3);
 
@@ -751,14 +884,14 @@ export function buildStudyResearchBriefMarkdown(
       "No evaluated multi-caption prompt images are available in this study.",
     );
   } else {
-    topPairs.forEach(({ group, pair }, index) => {
+    topPairs.forEach(({ group, pair, pairSpreadPp }, index) => {
       const promptTitle = escapeMarkdownInline(
         group.imageDescription ?? "Shared prompt image",
       );
       sections.push(
         `### ${index + 1}. ${promptTitle}`,
         "",
-        `- **Image baseline:** ${formatStudioRate(group.imageMeanRate)} across ${group.captions.length} captions (top-to-bottom gap: +${(group.spreadPp ?? 0).toFixed(1)} pp)`,
+        `- **Image baseline:** ${formatStudioRate(group.imageMeanRate)} across ${group.captions.length} captions (top-to-bottom gap: +${pairSpreadPp.toFixed(1)} pp)`,
         `- **Winner (\`${escapeMarkdownInline(pair.winner.flavorSlug)}\` · ${formatStudioRate(pair.winner.rate)}, ${pair.winner.positive}/${pair.winner.exposures} ${bundle.exposureBundle.exposureUnitLabel}):** "${escapeMarkdownInline(pair.winner.captionText)}"`,
         `- **Lowest (\`${escapeMarkdownInline(pair.flop.flavorSlug)}\` · ${formatStudioRate(pair.flop.rate)}, ${pair.flop.positive}/${pair.flop.exposures} ${bundle.exposureBundle.exposureUnitLabel}):** "${escapeMarkdownInline(pair.flop.captionText)}"`,
         "",
@@ -774,6 +907,11 @@ export function buildStudyExportPayload(
 ): StudyExportPayload {
   return {
     studyId: bundle.study.id,
+    pdfFilename: getStudyAttributionPdfFilename(
+      bundle.study.id,
+      bundle.excludeHighRisk,
+    ),
+    pdfReport: buildStudyPdfReportData(bundle),
     csvFilename: getStudyAttributionCsvFilename(bundle.study.id),
     csvContent: buildStudyAttributionCsv(bundle),
     briefFilename: getStudyResearchBriefFilename(bundle.study.id),

@@ -17,6 +17,11 @@ type HomePageProps = {
     q?: string | string[];
     flavor?: string | string[];
     model?: string | string[];
+    scope?: string | string[];
+    format?: string | string[];
+    sort?: string | string[];
+    era?: string | string[];
+    lens?: string | string[];
   }>;
 };
 
@@ -26,6 +31,11 @@ export default async function Home({ searchParams }: HomePageProps) {
     getFirstQueryParam(resolvedParams.q)?.slice(0, 80) ?? "";
   const initialFlavorParam = getFirstQueryParam(resolvedParams.flavor);
   const initialModelParam = getFirstQueryParam(resolvedParams.model);
+  const initialScopeParam = getFirstQueryParam(resolvedParams.scope);
+  const initialFormatParam = getFirstQueryParam(resolvedParams.format);
+  const initialSortParam = getFirstQueryParam(resolvedParams.sort);
+  const initialEraParam = getFirstQueryParam(resolvedParams.era);
+  const initialLensParam = getFirstQueryParam(resolvedParams.lens);
   const initialTab = resolveHubWorkspaceTab(
     getFirstQueryParam(resolvedParams.tab),
     initialFlavorParam,
@@ -45,10 +55,7 @@ export default async function Home({ searchParams }: HomePageProps) {
         <section className="app-panel mx-auto w-full max-w-7xl space-y-4 rounded-2xl p-4 sm:space-y-5 sm:p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="app-kicker text-xs font-semibold uppercase tracking-[0.24em]">
-                The LOL Report
-              </p>
-              <h1 className="mt-0.5 text-xl font-semibold sm:mt-1 sm:text-3xl">
+              <h1 className="text-xl font-semibold sm:text-3xl">
                 Attribution Studio
               </h1>
             </div>
@@ -77,12 +84,17 @@ export default async function Home({ searchParams }: HomePageProps) {
           </div>
 
           <HomeAttributionWorkspace
-            key={`${initialTab}|${initialQuery}|${initialFlavorParam ?? ""}|${initialModelParam ?? ""}`}
+            key={`${initialTab}|${initialQuery}|${initialFlavorParam ?? ""}|${initialModelParam ?? ""}|${initialScopeParam ?? ""}|${initialFormatParam ?? ""}|${initialSortParam ?? ""}|${initialEraParam ?? ""}|${initialLensParam ?? ""}`}
             dataset={dataset}
             initialTab={initialTab}
             initialQuery={initialQuery}
             initialFlavorParam={initialFlavorParam}
             initialModelParam={initialModelParam}
+            initialScopeParam={initialScopeParam}
+            initialFormatParam={initialFormatParam}
+            initialSortParam={initialSortParam}
+            initialEraParam={initialEraParam}
+            initialLensParam={initialLensParam}
           />
         </section>
       </main>

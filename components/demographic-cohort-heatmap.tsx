@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
 import { AppSelect, type AppSelectOption } from "@/components/app-select";
@@ -30,10 +30,56 @@ export type DemographicCohortHeatmapProps = {
   demographics: DemographicMatrixBundle;
   flavorRows?: readonly AttributionLeaderboardRow[];
   overallSampleCaptions?: readonly AttributionSampleCaption[];
+  initialQuestionParam?: string | null;
+  initialMetricParam?: string | null;
+  initialColsParam?: string | null;
+  initialFlavorParam?: string | null;
 };
 
 type HeatmapMetricMode = "rate" | "delta";
 type ColumnScopeMode = "top8" | "all";
+
+const syncDemographicsUrlParams = (updates: {
+  question?: number | null;
+  defaultQuestionId?: number;
+  metric?: HeatmapMetricMode | null;
+  cols?: ColumnScopeMode | null;
+}) => {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  if (updates.question !== undefined) {
+    if (
+      updates.question !== null &&
+      updates.question !== updates.defaultQuestionId
+    ) {
+      params.set("question", String(updates.question));
+    } else {
+      params.delete("question");
+    }
+  }
+  if (updates.metric !== undefined) {
+    if (updates.metric === "delta") {
+      params.set("metric", "delta");
+    } else {
+      params.delete("metric");
+    }
+  }
+  if (updates.cols !== undefined) {
+    if (updates.cols === "all") {
+      params.set("cols", "all");
+    } else {
+      params.delete("cols");
+    }
+  }
+  const nextQuery = params.toString();
+  window.history.replaceState(
+    window.history.state,
+    "",
+    nextQuery
+      ? `${window.location.pathname}?${nextQuery}`
+      : window.location.pathname,
+  );
+};
 
 type PinnedCellKey = {
   questionId: number;
@@ -107,16 +153,48 @@ export function DemographicCohortHeatmap({
   demographics,
   flavorRows = [],
   overallSampleCaptions = [],
+  initialQuestionParam,
+  initialMetricParam,
+  initialColsParam,
+  initialFlavorParam,
 }: DemographicCohortHeatmapProps) {
+  const heatmapSectionRef = useRef<HTMLElement | null>(null);
   const defaultQuestion =
     demographics.questions.find((q) => q.visibleSegmentCount > 0) ??
     demographics.questions[0];
 
-  const [selectedQuestionId, setSelectedQuestionId] = useState<number>(
-    defaultQuestion?.questionId ?? 0,
+  const [selectedQuestionId, setSelectedQuestionId] = useState<number>(() => {
+    const parsed = initialQuestionParam
+      ? Number.parseInt(initialQuestionParam, 10)
+      : Number.NaN;
+    if (
+      Number.isInteger(parsed) &&
+      demographics.questions.some((q) => q.questionId === parsed)
+    ) {
+      return parsed;
+    }
+    return defaultQuestion?.questionId ?? 0;
+  });
+  const [metricMode, setMetricMode] = useState<HeatmapMetricMode>(() =>
+    initialMetricParam?.trim().toLowerCase() === "delta" ? "delta" : "rate",
   );
-  const [metricMode, setMetricMode] = useState<HeatmapMetricMode>("rate");
-  const [columnScope, setColumnScope] = useState<ColumnScopeMode>("top8");
+  const [columnScope, setColumnScope] = useState<ColumnScopeMode>(() => {
+    if (initialColsParam?.trim().toLowerCase() === "all") {
+      return "all";
+    }
+    const trimmedFlavor = initialFlavorParam?.trim().toLowerCase();
+    if (trimmedFlavor) {
+      const idx = demographics.flavorColumns.findIndex(
+        (col) =>
+          String(col.flavorId) === trimmedFlavor ||
+          col.flavorSlug.toLowerCase() === trimmedFlavor,
+      );
+      if (idx >= TOP_FLAVOR_COLUMN_LIMIT) {
+        return "all";
+      }
+    }
+    return "top8";
+  });
   const [pinnedKey, setPinnedKey] = useState<PinnedCellKey | null>(null);
   const [showAllGaps, setShowAllGaps] = useState(false);
   const [brokenCaptionImageIds, setBrokenCaptionImageIds] = useState<
@@ -209,7 +287,11 @@ export function DemographicCohortHeatmap({
       cell,
       sampleCaptions: sampleCaptions.slice(0, 3),
       hideVoterCount:
-        row.rowKind === "unsurveyed" && activeQuestionHasSuppressedPool,
+        Boolean(activeQuestion.coarsenVoterCounts) ||
+        (row.rowKind === "unsurveyed" &&
+          (activeQuestionHasSuppressedPool ||
+            Boolean(activeQuestion.hideUnsurveyedCount))) ||
+        (row.rowKind === "masked_pool" && row.distinctVoters === null),
     };
   })();
 
@@ -266,12 +348,20 @@ export function DemographicCohortHeatmap({
     }
 
     if (cell.status === "suppressed") {
+      const isComplementary = cell.reason === "complementary";
       return (
         <td
           key={columnKey}
+          title={
+            isComplementary
+              ? "Complementary suppression applied so column totals cannot isolate fewer than 5 voters"
+              : "Masked below k >= 5 distinct voters"
+          }
           className={`bg-slate-500/6 px-3 py-2.5 text-center align-middle dark:bg-slate-400/6 ${extraClassName}`}
         >
-          <span className="app-muted text-xs font-medium">n &lt; 5</span>
+          <span className="app-muted text-xs font-medium">
+            {isComplementary ? "Masked" : "n < 5"}
+          </span>
         </td>
       );
     }
@@ -328,7 +418,7 @@ export function DemographicCohortHeatmap({
   return (
     <div className="space-y-5">
       {activeQuestion ? (
-        <section className="space-y-3">
+        <section ref={heatmapSectionRef} className="space-y-3">
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
               <AppSelect
@@ -339,6 +429,10 @@ export function DemographicCohortHeatmap({
                   const parsed = Number.parseInt(nextValue, 10);
                   if (Number.isInteger(parsed)) {
                     setSelectedQuestionId(parsed);
+                    syncDemographicsUrlParams({
+                      question: parsed,
+                      defaultQuestionId: defaultQuestion?.questionId,
+                    });
                   }
                 }}
                 menuMinWidthPx={320}
@@ -351,7 +445,10 @@ export function DemographicCohortHeatmap({
                 <button
                   type="button"
                   aria-pressed={metricMode === "rate"}
-                  onClick={() => setMetricMode("rate")}
+                  onClick={() => {
+                    setMetricMode("rate");
+                    syncDemographicsUrlParams({ metric: "rate" });
+                  }}
                   className={`h-7 shrink-0 cursor-pointer whitespace-nowrap rounded-md px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 ${
                     metricMode === "rate"
                       ? "bg-white text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
@@ -363,7 +460,10 @@ export function DemographicCohortHeatmap({
                 <button
                   type="button"
                   aria-pressed={metricMode === "delta"}
-                  onClick={() => setMetricMode("delta")}
+                  onClick={() => {
+                    setMetricMode("delta");
+                    syncDemographicsUrlParams({ metric: "delta" });
+                  }}
                   className={`h-7 shrink-0 cursor-pointer whitespace-nowrap rounded-md px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 ${
                     metricMode === "delta"
                       ? "bg-white text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
@@ -379,7 +479,10 @@ export function DemographicCohortHeatmap({
                   <button
                     type="button"
                     aria-pressed={columnScope === "top8"}
-                    onClick={() => setColumnScope("top8")}
+                    onClick={() => {
+                      setColumnScope("top8");
+                      syncDemographicsUrlParams({ cols: "top8" });
+                    }}
                     className={`h-7 shrink-0 cursor-pointer whitespace-nowrap rounded-md px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 ${
                       columnScope === "top8"
                         ? "bg-white text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
@@ -391,7 +494,10 @@ export function DemographicCohortHeatmap({
                   <button
                     type="button"
                     aria-pressed={columnScope === "all"}
-                    onClick={() => setColumnScope("all")}
+                    onClick={() => {
+                      setColumnScope("all");
+                      syncDemographicsUrlParams({ cols: "all" });
+                    }}
                     className={`h-7 shrink-0 cursor-pointer whitespace-nowrap rounded-md px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 ${
                       columnScope === "all"
                         ? "bg-white text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
@@ -420,7 +526,7 @@ export function DemographicCohortHeatmap({
                 <span>Above mean</span>
               </span>
               <span className="whitespace-nowrap rounded bg-slate-500/10 px-1.5 py-0.5 font-medium">
-                n &lt; 5 masked
+                n &lt; 5 / Masked
               </span>
             </div>
           </div>
@@ -492,10 +598,18 @@ export function DemographicCohortHeatmap({
                     const voterSubtitle = getCohortRowVoterSubtitle(
                       row,
                       activeQuestionHasSuppressedPool,
+                      {
+                        coarsenVoterCounts: activeQuestion.coarsenVoterCounts,
+                        hideUnsurveyedCount: activeQuestion.hideUnsurveyedCount,
+                      },
                     );
                     const hideCellVoterCount =
-                      row.rowKind === "unsurveyed" &&
-                      activeQuestionHasSuppressedPool;
+                      Boolean(activeQuestion.coarsenVoterCounts) ||
+                      (row.rowKind === "unsurveyed" &&
+                        (activeQuestionHasSuppressedPool ||
+                          Boolean(activeQuestion.hideUnsurveyedCount))) ||
+                      (row.rowKind === "masked_pool" &&
+                        row.distinctVoters === null);
 
                     return (
                       <tr
@@ -679,15 +793,58 @@ export function DemographicCohortHeatmap({
                   const questionShort =
                     gap.questionLabel ??
                     abbreviateSurveyQuestion(gap.questionText);
+                  const isSelectedGap =
+                    activeQuestion?.questionId === gap.questionId &&
+                    metricMode === "delta";
+                  const focusGapInHeatmap = () => {
+                    setSelectedQuestionId(gap.questionId);
+                    setMetricMode("delta");
+                    const colIdx = demographics.flavorColumns.findIndex(
+                      (col) => col.flavorKey === gap.flavorKey,
+                    );
+                    const nextCols =
+                      colIdx >= TOP_FLAVOR_COLUMN_LIMIT ? "all" : columnScope;
+                    if (nextCols !== columnScope) {
+                      setColumnScope(nextCols);
+                    }
+                    syncDemographicsUrlParams({
+                      question: gap.questionId,
+                      defaultQuestionId: defaultQuestion?.questionId,
+                      metric: "delta",
+                      cols: nextCols,
+                    });
+                    heatmapSectionRef.current?.scrollIntoView({
+                      behavior: "smooth",
+                      block: "nearest",
+                    });
+                  };
                   return (
-                    <tr key={`${gap.questionId}-${gap.flavorKey}`}>
+                    <tr
+                      key={`${gap.questionId}-${gap.flavorKey}`}
+                      onClick={(event) => {
+                        if (
+                          event.target instanceof Element &&
+                          event.target.closest("a, button")
+                        ) {
+                          return;
+                        }
+                        focusGapInHeatmap();
+                      }}
+                      className={`group cursor-pointer transition hover:bg-sky-500/[0.06] dark:hover:bg-cyan-300/[0.06] ${
+                        isSelectedGap
+                          ? "bg-sky-500/10 dark:bg-cyan-300/10"
+                          : ""
+                      }`}
+                    >
                       <td className="px-3 py-2.5 align-top">
-                        <span className="block font-semibold text-foreground">
+                        <button
+                          type="button"
+                          title={gap.questionText}
+                          onClick={focusGapInHeatmap}
+                          className="cursor-pointer text-left font-semibold text-foreground group-hover:underline focus-visible:outline-none focus-visible:underline"
+                        >
                           {questionShort}
-                        </span>
-                        <span className="app-muted mt-0.5 block text-xs">
-                          {gap.questionText}
-                        </span>
+                        </button>
                       </td>
                       {isSingleFlavorStudy ? null : (
                         <td className="px-3 py-2.5 align-top">
@@ -708,8 +865,11 @@ export function DemographicCohortHeatmap({
                           {gap.highAnswerLabel}
                         </span>{" "}
                         <span className="app-muted text-xs">
-                          · {formatStudioRate(gap.highRate)} (n=
-                          {gap.highVoters.toLocaleString()})
+                          · {formatStudioRate(gap.highRate)} (
+                          {gap.coarsenVoters
+                            ? "n≥5"
+                            : `n=${gap.highVoters.toLocaleString()}`}
+                          )
                         </span>
                       </td>
                       <td className="px-3 py-2.5 align-top tabular-nums">
@@ -717,8 +877,11 @@ export function DemographicCohortHeatmap({
                           {gap.lowAnswerLabel}
                         </span>{" "}
                         <span className="app-muted text-xs">
-                          · {formatStudioRate(gap.lowRate)} (n=
-                          {gap.lowVoters.toLocaleString()})
+                          · {formatStudioRate(gap.lowRate)} (
+                          {gap.coarsenVoters
+                            ? "n≥5"
+                            : `n=${gap.lowVoters.toLocaleString()}`}
+                          )
                         </span>
                       </td>
                       <td className="whitespace-nowrap px-3 py-2.5 text-right align-top font-semibold tabular-nums text-emerald-800 dark:text-emerald-300">

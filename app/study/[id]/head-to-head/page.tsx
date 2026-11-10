@@ -11,8 +11,7 @@ import {
   parsePositiveStudyId,
 } from "@/utils/attribution-ui-helpers";
 import {
-  getCachedFlavorCrossStudyTrajectories,
-  getCachedStudyAttributionBundle,
+  getCachedStudyHeadToHeadPageData,
 } from "@/utils/study-lineage-loader";
 
 type StudyHeadToHeadPageProps = {
@@ -23,6 +22,7 @@ type StudyHeadToHeadPageProps = {
     excludeHighRisk?: string | string[];
     flavor?: string | string[];
     rival?: string | string[];
+    sort?: string | string[];
   }>;
 };
 
@@ -42,22 +42,12 @@ export default async function StudyHeadToHeadPage({
   const excludeHighRisk = isTruthyFlagParam(query.excludeHighRisk);
   const initialFlavorParam = getFirstQueryParam(query.flavor) ?? null;
   const initialRivalParam = getFirstQueryParam(query.rival) ?? null;
-  const bundle = await getCachedStudyAttributionBundle(
-    studyId,
-    excludeHighRisk,
-  );
+  const initialSortParam = getFirstQueryParam(query.sort) ?? null;
+  const { bundle, trajectoriesByFlavorId } =
+    await getCachedStudyHeadToHeadPageData(studyId, excludeHighRisk);
   if (!bundle) {
     notFound();
   }
-
-  const attributedFlavorIds = bundle.leaderboards.flavors
-    .map((row) => row.flavorId)
-    .filter((flavorId): flavorId is number => flavorId !== null);
-
-  const trajectoriesByFlavorId =
-    attributedFlavorIds.length > 0
-      ? await getCachedFlavorCrossStudyTrajectories(attributedFlavorIds)
-      : {};
 
   const exportPayload = buildStudyExportPayload(bundle);
   const hasCrossFlavorShowdowns =
@@ -72,8 +62,8 @@ export default async function StudyHeadToHeadPage({
   return (
     <div className="flex min-h-screen flex-col bg-background">
       <TopNavbar />
-      <main className="page-shell flex-1 p-4 text-foreground sm:p-6">
-        <section className="app-panel mx-auto w-full max-w-7xl space-y-5 rounded-2xl p-5 sm:p-6">
+      <main className="page-shell flex-1 p-3 text-foreground sm:p-6">
+        <section className="app-panel mx-auto w-full max-w-7xl space-y-4 rounded-2xl p-4 sm:space-y-5 sm:p-6">
           <StudySubNav
             study={bundle.study}
             studies={bundle.studies}
@@ -82,25 +72,11 @@ export default async function StudyHeadToHeadPage({
             isTransitionalLikert={bundle.exposureBundle.isTransitionalLikert}
             excludeHighRisk={bundle.excludeHighRisk}
             highRiskVoterCount={bundle.exposureBundle.highRiskVoterCount}
-            actions={
-              <>
-                <div className="hidden sm:block">
-                  <StudyExportToolbar payload={exportPayload} />
-                </div>
-                <details className="sm:hidden open:w-full open:basis-full">
-                  <summary className="app-button inline-flex h-9 list-none cursor-pointer items-center gap-1.5 rounded-lg px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 [&::-webkit-details-marker]:hidden">
-                    <span>Export ▾</span>
-                  </summary>
-                  <div className="mt-2 rounded-xl border border-slate-200/90 bg-[#fffaf5] p-2.5 shadow-sm dark:border-cyan-200/18 dark:bg-[#0b1424]">
-                    <StudyExportToolbar payload={exportPayload} />
-                  </div>
-                </details>
-              </>
-            }
+            actions={<StudyExportToolbar payload={exportPayload} />}
           />
 
           <SameImageShowdownFeed
-            key={`${bundle.study.id}|${initialFlavorParam ?? ""}|${initialRivalParam ?? ""}`}
+            key={`${bundle.study.id}|${initialFlavorParam ?? ""}|${initialRivalParam ?? ""}|${initialSortParam ?? ""}`}
             studyId={bundle.study.id}
             excludeHighRisk={bundle.excludeHighRisk}
             exposureUnitLabel={bundle.exposureBundle.exposureUnitLabel}
@@ -109,6 +85,7 @@ export default async function StudyHeadToHeadPage({
             trajectoriesByFlavorId={trajectoriesByFlavorId}
             initialFlavorParam={initialFlavorParam}
             initialRivalParam={initialRivalParam}
+            initialSortParam={initialSortParam}
             totalExposures={bundle.exposureBundle.totalExposures}
             studyCaptions={serializedStudyCaptions}
           />

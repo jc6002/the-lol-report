@@ -3,7 +3,13 @@
 import { ChevronRight, Search } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useDeferredValue, useMemo, useState, useTransition } from "react";
+import {
+  useDeferredValue,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 
 import { AppSelect, type AppSelectOption } from "@/components/app-select";
 import { GlobalFlavorLeaderboard } from "@/components/global-flavor-leaderboard";
@@ -20,12 +26,68 @@ import {
   type HubStudyScope,
   type HubWorkspaceTab,
 } from "@/utils/attribution-ui-helpers";
-import { formatDurationFromMinutes } from "@/utils/format-duration";
 import type {
   EnrichedStudyCatalogEntry,
   FastStudyHubCatalog,
   GlobalAttributionDataset,
 } from "@/utils/global-attribution-loader";
+
+const formatCompactRunMinutes = (
+  value: number | null | undefined,
+): string => {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "n/a";
+  }
+  const totalSeconds = Math.max(0, Math.round(value * 60));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return seconds > 0 ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+  }
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+};
+
+const parseInitialHubScope = (raw?: string): HubStudyScope => {
+  const normalized = raw?.trim().toLowerCase();
+  if (normalized === "scored" || normalized === "benchmarks") {
+    return normalized;
+  }
+  return "all";
+};
+
+const parseInitialHubFormat = (raw?: string): HubFormatFilter => {
+  const normalized = raw?.trim().toLowerCase();
+  if (normalized === "swipe") {
+    return "Swipe";
+  }
+  if (
+    normalized === "rating scale" ||
+    normalized === "rating" ||
+    normalized === "likert"
+  ) {
+    return "Rating scale";
+  }
+  return "all";
+};
+
+const VALID_HUB_SORTS = new Set<HubSortMode>([
+  "newest_scored",
+  "most_flavors",
+  "most_votes",
+  "highest_positive_rate",
+  "highest_completion",
+  "newest",
+]);
+
+const parseInitialHubSort = (raw?: string): HubSortMode => {
+  const trimmed = raw?.trim() as HubSortMode | undefined;
+  return trimmed && VALID_HUB_SORTS.has(trimmed) ? trimmed : "newest_scored";
+};
 
 const FORMAT_OPTIONS: ReadonlyArray<{
   value: HubFormatFilter;
@@ -68,11 +130,16 @@ const buildLineageSubline = (row: EnrichedStudyCatalogEntry): string => {
   return parts.join(" · ");
 };
 
-const syncBrowserUrlParams = (updates: {
+export const syncHubBrowserUrlParams = (updates: {
   tab?: HubWorkspaceTab;
   q?: string | null;
   flavor?: string | null;
   model?: string | null;
+  scope?: HubStudyScope | null;
+  format?: HubFormatFilter | null;
+  sort?: HubSortMode | null;
+  era?: "all" | "swipe" | "rating" | null;
+  lens?: "synthesis" | "pipeline" | null;
 }) => {
   if (typeof window === "undefined") {
     return;
@@ -105,6 +172,41 @@ const syncBrowserUrlParams = (updates: {
       params.set("model", updates.model);
     } else {
       params.delete("model");
+    }
+  }
+  if (updates.scope !== undefined) {
+    if (updates.scope && updates.scope !== "all") {
+      params.set("scope", updates.scope);
+    } else {
+      params.delete("scope");
+    }
+  }
+  if (updates.format !== undefined) {
+    if (updates.format && updates.format !== "all") {
+      params.set("format", updates.format);
+    } else {
+      params.delete("format");
+    }
+  }
+  if (updates.sort !== undefined) {
+    if (updates.sort && updates.sort !== "newest_scored") {
+      params.set("sort", updates.sort);
+    } else {
+      params.delete("sort");
+    }
+  }
+  if (updates.era !== undefined) {
+    if (updates.era && updates.era !== "all") {
+      params.set("era", updates.era);
+    } else {
+      params.delete("era");
+    }
+  }
+  if (updates.lens !== undefined) {
+    if (updates.lens && updates.lens !== "synthesis") {
+      params.set("lens", updates.lens);
+    } else {
+      params.delete("lens");
     }
   }
   const nextQuery = params.toString();
@@ -208,7 +310,12 @@ export function StudyDirectoryTable({
     setStatusFilter("all");
     setFormatFilter("all");
     setSortMode("newest_scored");
-    syncBrowserUrlParams({ q: null });
+    syncHubBrowserUrlParams({
+      q: null,
+      scope: "all",
+      format: "all",
+      sort: "newest_scored",
+    });
   };
 
   const scopeOptions: Array<{
@@ -261,7 +368,7 @@ export function StudyDirectoryTable({
               onChange={(event) => {
                 const nextValue = event.target.value;
                 updateSearchQuery(nextValue);
-                syncBrowserUrlParams({ q: nextValue });
+                syncHubBrowserUrlParams({ q: nextValue });
               }}
               placeholder="Filter by study, prompt flavor, or model..."
               aria-label="Filter by study, prompt flavor, or model"
@@ -282,7 +389,10 @@ export function StudyDirectoryTable({
                   type="button"
                   disabled={option.disabled}
                   aria-pressed={isActive}
-                  onClick={() => setScopeFilter(option.value)}
+                  onClick={() => {
+                    setScopeFilter(option.value);
+                    syncHubBrowserUrlParams({ scope: option.value });
+                  }}
                   className={`h-7 shrink-0 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
                     isActive
                       ? "bg-white text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
@@ -307,7 +417,10 @@ export function StudyDirectoryTable({
                   key={option.value}
                   type="button"
                   aria-pressed={isActive}
-                  onClick={() => setFormatFilter(option.value)}
+                  onClick={() => {
+                    setFormatFilter(option.value);
+                    syncHubBrowserUrlParams({ format: option.value });
+                  }}
                   className={`h-7 shrink-0 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition ${
                     isActive
                       ? "bg-white text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
@@ -354,7 +467,10 @@ export function StudyDirectoryTable({
           <AppSelect<HubSortMode>
             options={SORT_OPTIONS}
             value={sortMode}
-            onValueChange={setSortMode}
+            onValueChange={(nextSort) => {
+              setSortMode(nextSort);
+              syncHubBrowserUrlParams({ sort: nextSort });
+            }}
             ariaLabel="Sort studies"
             menuMinWidthPx={230}
             className="w-52 rounded-lg text-xs sm:w-56 sm:text-sm"
@@ -428,8 +544,8 @@ export function StudyDirectoryTable({
                         <span
                           className={
                             row.exposureMode === "swipe_navigation"
-                              ? "inline-flex rounded bg-sky-500/14 px-1.5 py-0.5 font-medium text-slate-900 ring-1 ring-sky-500/30 dark:text-sky-100"
-                              : "inline-flex rounded bg-amber-500/16 px-1.5 py-0.5 font-medium text-amber-900 ring-1 ring-amber-500/30 dark:text-amber-100"
+                              ? "inline-flex rounded bg-sky-500/14 px-1.5 py-0.5 font-medium text-slate-900 dark:text-sky-100"
+                              : "inline-flex rounded bg-amber-500/16 px-1.5 py-0.5 font-medium text-amber-900 dark:text-amber-100"
                           }
                         >
                           {row.formatDisplayLabel}
@@ -590,8 +706,8 @@ export function StudyDirectoryTable({
                           <span
                             className={
                               row.exposureMode === "swipe_navigation"
-                                ? "inline-flex rounded-md bg-sky-500/14 px-2 py-0.5 text-xs font-medium text-slate-900 ring-1 ring-sky-500/30 dark:text-sky-100"
-                                : "inline-flex rounded-md bg-amber-500/18 px-2 py-0.5 text-xs font-medium text-amber-900 ring-1 ring-amber-500/35 dark:text-amber-100"
+                                ? "inline-flex rounded-md bg-sky-500/14 px-2 py-0.5 text-xs font-medium text-slate-900 dark:text-sky-100"
+                                : "inline-flex rounded-md bg-amber-500/18 px-2 py-0.5 text-xs font-medium text-amber-900 dark:text-amber-100"
                             }
                           >
                             {row.formatDisplayLabel}
@@ -622,7 +738,7 @@ export function StudyDirectoryTable({
                               <span className="app-muted mt-0.5 block text-xs">
                                 {formatCompactCount(row.exposureCount)} views ·{" "}
                                 {row.voterCount.toLocaleString()} voters ·{" "}
-                                {formatDurationFromMinutes(row.medianRunMinutes)}
+                                {formatCompactRunMinutes(row.medianRunMinutes)}
                               </span>
                             </div>
                           ) : (
@@ -748,15 +864,26 @@ export function HomeAttributionWorkspace({
   initialQuery = "",
   initialFlavorParam,
   initialModelParam,
+  initialScopeParam,
+  initialFormatParam,
+  initialSortParam,
+  initialEraParam,
+  initialLensParam,
 }: {
   dataset: GlobalAttributionDataset | FastStudyHubCatalog;
   initialTab: HubWorkspaceTab;
   initialQuery?: string;
   initialFlavorParam?: string;
   initialModelParam?: string;
+  initialScopeParam?: string;
+  initialFormatParam?: string;
+  initialSortParam?: string;
+  initialEraParam?: string;
+  initialLensParam?: string;
 }) {
   const router = useRouter();
   const [isTabPending, startTabTransition] = useTransition();
+  const tabButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const hasFullLeaderboards = "flavors" in dataset;
   const { kpis } = dataset;
   const [activeTab, setActiveTab] = useState<HubWorkspaceTab>(initialTab);
@@ -771,12 +898,30 @@ export function HomeAttributionWorkspace({
     scope: HubStudyScope;
     sort: HubSortMode;
     format: HubFormatFilter;
-  }>({
+  }>(() => ({
     epoch: 0,
-    scope: "all",
-    sort: "newest_scored",
-    format: "all",
-  });
+    scope: parseInitialHubScope(initialScopeParam),
+    sort: parseInitialHubSort(initialSortParam),
+    format: parseInitialHubFormat(initialFormatParam),
+  }));
+
+  const tabDefinitions = [
+    {
+      id: "studies" as const,
+      label: `Studies (${dataset.studies.length})`,
+      shortLabel: `Studies (${dataset.studies.length})`,
+    },
+    {
+      id: "flavors" as const,
+      label: `Prompt Flavors (${kpis.testedFlavorCount})`,
+      shortLabel: `Flavors (${kpis.testedFlavorCount})`,
+    },
+    {
+      id: "models" as const,
+      label: `Models (${kpis.testedModelCount})`,
+      shortLabel: `Models (${kpis.testedModelCount})`,
+    },
+  ];
 
   const selectTab = (nextTab: HubWorkspaceTab) => {
     setActiveTab(nextTab);
@@ -795,11 +940,16 @@ export function HomeAttributionWorkspace({
         });
       }
     }
-    syncBrowserUrlParams({
+    syncHubBrowserUrlParams({
       tab: nextTab,
       q: studyQuery,
       flavor: nextTab === "flavors" ? undefined : null,
       model: nextTab === "models" ? undefined : null,
+      scope: nextTab === "studies" ? studyPreset.scope : null,
+      format: nextTab === "studies" ? studyPreset.format : null,
+      sort: nextTab === "studies" ? studyPreset.sort : null,
+      era: nextTab === "studies" ? null : undefined,
+      lens: nextTab === "models" ? undefined : null,
     });
   };
 
@@ -826,12 +976,39 @@ export function HomeAttributionWorkspace({
         });
       });
     }
-    syncBrowserUrlParams({
+    syncHubBrowserUrlParams({
       tab: "studies",
       q: studyQuery,
       flavor: null,
       model: null,
+      scope,
+      format,
+      sort,
+      era: null,
+      lens: null,
     });
+  };
+
+  const handleTabKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (index + 1) % tabDefinitions.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (index - 1 + tabDefinitions.length) % tabDefinitions.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = tabDefinitions.length - 1;
+    }
+    if (nextIndex !== null) {
+      event.preventDefault();
+      const targetTab = tabDefinitions[nextIndex];
+      tabButtonRefs.current[nextIndex]?.focus();
+      selectTab(targetTab.id);
+    }
   };
 
   return (
@@ -842,15 +1019,21 @@ export function HomeAttributionWorkspace({
           onClick={() =>
             applyStudyPreset({ scope: "all", sort: "newest_scored" })
           }
-          className={`app-card app-stat-card-teal min-w-0 cursor-pointer rounded-xl p-3 text-left transition hover:-translate-y-0.5 hover:ring-2 hover:ring-[var(--accent)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:p-4 ${
+          className={`group app-card app-stat-card-teal min-w-0 cursor-pointer rounded-xl p-3 text-left transition hover:-translate-y-0.5 hover:ring-2 hover:ring-[var(--accent)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:p-4 ${
             activeTab === "studies" && studyPreset.sort !== "highest_completion"
               ? "ring-1 ring-[var(--accent)]/45"
               : ""
           }`}
         >
-          <p className="app-kicker text-[11px] font-semibold uppercase tracking-wide sm:text-xs">
-            Studies
-          </p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="app-kicker text-[11px] font-semibold uppercase tracking-wide sm:text-xs">
+              Studies
+            </p>
+            <ChevronRight
+              aria-hidden="true"
+              className="app-muted h-3.5 w-3.5 shrink-0 transition-transform group-hover:translate-x-0.5 group-hover:text-foreground"
+            />
+          </div>
           <p className="mt-1 text-xl font-semibold tabular-nums sm:mt-2 sm:text-2xl">
             {kpis.totalStudies.toLocaleString()}
           </p>
@@ -869,15 +1052,21 @@ export function HomeAttributionWorkspace({
               format: "Swipe",
             })
           }
-          className={`app-card app-stat-card-sky min-w-0 cursor-pointer rounded-xl p-3 text-left transition hover:-translate-y-0.5 hover:ring-2 hover:ring-[var(--accent)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:p-4 ${
+          className={`group app-card app-stat-card-sky min-w-0 cursor-pointer rounded-xl p-3 text-left transition hover:-translate-y-0.5 hover:ring-2 hover:ring-[var(--accent)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:p-4 ${
             activeTab === "studies" && studyPreset.sort === "highest_completion"
               ? "ring-1 ring-[var(--accent)]/45"
               : ""
           }`}
         >
-          <p className="app-kicker text-[11px] font-semibold uppercase tracking-wide sm:text-xs">
-            Completion Rate
-          </p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="app-kicker text-[11px] font-semibold uppercase tracking-wide sm:text-xs">
+              Completion Rate
+            </p>
+            <ChevronRight
+              aria-hidden="true"
+              className="app-muted h-3.5 w-3.5 shrink-0 transition-transform group-hover:translate-x-0.5 group-hover:text-foreground"
+            />
+          </div>
           <p className="mt-1 text-xl font-semibold tabular-nums sm:mt-2 sm:text-2xl">
             {formatHubPercent(kpis.overallCompletionRate)}
           </p>
@@ -890,40 +1079,52 @@ export function HomeAttributionWorkspace({
         <button
           type="button"
           onClick={() => selectTab("flavors")}
-          className={`app-card app-stat-card-amber min-w-0 cursor-pointer rounded-xl p-3 text-left transition hover:-translate-y-0.5 hover:ring-2 hover:ring-[var(--accent)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:p-4 ${
+          className={`group app-card app-stat-card-amber min-w-0 cursor-pointer rounded-xl p-3 text-left transition hover:-translate-y-0.5 hover:ring-2 hover:ring-[var(--accent)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:p-4 ${
             activeTab === "flavors" ? "ring-1 ring-[var(--accent)]/45" : ""
           }`}
         >
-          <p className="app-kicker text-[11px] font-semibold uppercase tracking-wide sm:text-xs">
-            Evaluated Flavors
-          </p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="app-kicker text-[11px] font-semibold uppercase tracking-wide sm:text-xs">
+              Evaluated Flavors
+            </p>
+            <ChevronRight
+              aria-hidden="true"
+              className="app-muted h-3.5 w-3.5 shrink-0 transition-transform group-hover:translate-x-0.5 group-hover:text-foreground"
+            />
+          </div>
           <p className="mt-1 text-xl font-semibold tabular-nums sm:mt-2 sm:text-2xl">
             {kpis.testedFlavorCount.toLocaleString()} /{" "}
             {kpis.totalFlavorCount.toLocaleString()}
           </p>
           <p className="app-muted mt-0.5 line-clamp-1 text-[11px] tabular-nums sm:mt-1 sm:line-clamp-none sm:text-xs">
             {kpis.scoredFlavorCount} scored across{" "}
-            {kpis.mappedCaptionCount.toLocaleString()} captions →
+            {kpis.mappedCaptionCount.toLocaleString()} captions
           </p>
         </button>
 
         <button
           type="button"
           onClick={() => selectTab("models")}
-          className={`app-card app-stat-card-rose min-w-0 cursor-pointer rounded-xl p-3 text-left transition hover:-translate-y-0.5 hover:ring-2 hover:ring-[var(--accent)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:p-4 ${
+          className={`group app-card app-stat-card-rose min-w-0 cursor-pointer rounded-xl p-3 text-left transition hover:-translate-y-0.5 hover:ring-2 hover:ring-[var(--accent)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:p-4 ${
             activeTab === "models" ? "ring-1 ring-[var(--accent)]/45" : ""
           }`}
         >
-          <p className="app-kicker text-[11px] font-semibold uppercase tracking-wide sm:text-xs">
-            Evaluated Models
-          </p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="app-kicker text-[11px] font-semibold uppercase tracking-wide sm:text-xs">
+              Evaluated Models
+            </p>
+            <ChevronRight
+              aria-hidden="true"
+              className="app-muted h-3.5 w-3.5 shrink-0 transition-transform group-hover:translate-x-0.5 group-hover:text-foreground"
+            />
+          </div>
           <p className="mt-1 text-xl font-semibold tabular-nums sm:mt-2 sm:text-2xl">
             {kpis.testedModelCount.toLocaleString()} /{" "}
             {kpis.totalModelCount.toLocaleString()}
           </p>
           <p className="app-muted mt-0.5 line-clamp-1 text-[11px] tabular-nums sm:mt-1 sm:line-clamp-none sm:text-xs">
             {formatCompactCount(kpis.totalVoteEvents)} votes ·{" "}
-            {formatCompactCount(kpis.totalNavigationEvents)} swipe views →
+            {formatCompactCount(kpis.totalNavigationEvents)} swipe views
           </p>
         </button>
       </div>
@@ -933,25 +1134,7 @@ export function HomeAttributionWorkspace({
         aria-label="Attribution workspace views"
         className="app-input inline-flex max-w-full items-center gap-1 overflow-x-auto overflow-y-hidden rounded-xl p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
-        {(
-          [
-            {
-              id: "studies",
-              label: `Studies (${dataset.studies.length})`,
-              shortLabel: `Studies (${dataset.studies.length})`,
-            },
-            {
-              id: "flavors",
-              label: `Prompt Flavors (${kpis.testedFlavorCount})`,
-              shortLabel: `Flavors (${kpis.testedFlavorCount})`,
-            },
-            {
-              id: "models",
-              label: `Models (${kpis.testedModelCount})`,
-              shortLabel: `Models (${kpis.testedModelCount})`,
-            },
-          ] as const
-        ).map((tab) => {
+        {tabDefinitions.map((tab, index) => {
           const isSelected = activeTab === tab.id;
           const isLoadingTab =
             !hasFullLeaderboards &&
@@ -961,10 +1144,17 @@ export function HomeAttributionWorkspace({
           return (
             <button
               key={tab.id}
+              ref={(node) => {
+                tabButtonRefs.current[index] = node;
+              }}
+              id={`hub-tab-${tab.id}`}
               type="button"
               role="tab"
+              tabIndex={isSelected ? 0 : -1}
               aria-selected={isSelected}
+              aria-controls={`hub-panel-${tab.id}`}
               onClick={() => selectTab(tab.id)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
               className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs transition sm:px-3.5 sm:text-sm ${
                 isSelected
                   ? "bg-white font-semibold text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
@@ -984,48 +1174,57 @@ export function HomeAttributionWorkspace({
         })}
       </div>
 
-      {activeTab === "studies" ? (
-        <StudyDirectoryTable
-          key={`studies-${studyPreset.epoch}`}
-          studies={dataset.studies}
-          query={studyQuery}
-          onQueryChange={setStudyQuery}
-          initialScope={studyPreset.scope}
-          initialSort={studyPreset.sort}
-          initialFormat={studyPreset.format}
-        />
-      ) : !hasFullLeaderboards ? (
-        <div
-          role="status"
-          aria-live="polite"
-          className="app-card flex min-h-48 flex-col items-center justify-center gap-3 rounded-xl p-8 text-center text-sm"
-        >
-          <span aria-hidden="true" className="app-loading-spinner" />
-          <p className="app-muted text-xs sm:text-sm">
-            Loading cross-study{" "}
-            {activeTab === "flavors" ? "prompt flavor" : "LLM model"}{" "}
-            leaderboard...
-          </p>
-        </div>
-      ) : activeTab === "flavors" ? (
-        <GlobalFlavorLeaderboard
-          key={`flavors-${initialFlavorParam ?? ""}-${initialQuery}`}
-          flavors={dataset.flavors}
-          unusedFlavorCount={dataset.unusedFlavorCount}
-          initialFlavorParam={initialFlavorParam}
-          initialQuery={initialQuery}
-          onClearEntityFocus={() => syncBrowserUrlParams({ flavor: null })}
-        />
-      ) : (
-        <GlobalModelLeaderboard
-          key={`models-${initialModelParam ?? ""}-${initialQuery}`}
-          models={dataset.models}
-          unevaluatedModels={dataset.unevaluatedModels}
-          initialModelParam={initialModelParam}
-          initialQuery={initialQuery}
-          onClearEntityFocus={() => syncBrowserUrlParams({ model: null })}
-        />
-      )}
+      <div
+        id={`hub-panel-${activeTab}`}
+        role="tabpanel"
+        aria-labelledby={`hub-tab-${activeTab}`}
+      >
+        {activeTab === "studies" ? (
+          <StudyDirectoryTable
+            key={`studies-${studyPreset.epoch}`}
+            studies={dataset.studies}
+            query={studyQuery}
+            onQueryChange={setStudyQuery}
+            initialScope={studyPreset.scope}
+            initialSort={studyPreset.sort}
+            initialFormat={studyPreset.format}
+          />
+        ) : !hasFullLeaderboards ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="app-card flex min-h-48 flex-col items-center justify-center gap-3 rounded-xl p-8 text-center text-sm"
+          >
+            <span aria-hidden="true" className="app-loading-spinner" />
+            <p className="app-muted text-xs sm:text-sm">
+              Loading cross-study{" "}
+              {activeTab === "flavors" ? "prompt flavor" : "LLM model"}{" "}
+              leaderboard...
+            </p>
+          </div>
+        ) : activeTab === "flavors" ? (
+          <GlobalFlavorLeaderboard
+            key={`flavors-${initialFlavorParam ?? ""}-${initialQuery}-${initialEraParam ?? ""}`}
+            flavors={dataset.flavors}
+            unusedFlavorCount={dataset.unusedFlavorCount}
+            initialFlavorParam={initialFlavorParam}
+            initialQuery={initialQuery}
+            initialEraParam={initialEraParam}
+            onClearEntityFocus={() => syncHubBrowserUrlParams({ flavor: null })}
+          />
+        ) : (
+          <GlobalModelLeaderboard
+            key={`models-${initialModelParam ?? ""}-${initialQuery}-${initialEraParam ?? ""}-${initialLensParam ?? ""}`}
+            models={dataset.models}
+            unevaluatedModels={dataset.unevaluatedModels}
+            initialModelParam={initialModelParam}
+            initialQuery={initialQuery}
+            initialEraParam={initialEraParam}
+            initialLensParam={initialLensParam}
+            onClearEntityFocus={() => syncHubBrowserUrlParams({ model: null })}
+          />
+        )}
+      </div>
     </div>
   );
 }

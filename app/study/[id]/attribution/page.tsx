@@ -1,8 +1,10 @@
 import { notFound } from "next/navigation";
 
 import { StudyAttributionLeaderboard } from "@/components/study-attribution-leaderboard";
+import { StudyExportToolbar } from "@/components/study-export-toolbar";
 import { StudySubNav } from "@/components/study-sub-nav";
 import { TopNavbar } from "@/components/top-navbar";
+import { buildStudyExportPayload } from "@/utils/attribution-export";
 import {
   formatChainSecondsLabel,
   formatDwellDurationLabel,
@@ -12,8 +14,21 @@ import {
   isTruthyFlagParam,
   parsePositiveStudyId,
 } from "@/utils/attribution-ui-helpers";
-import { formatDurationFromMinutes } from "@/utils/format-duration";
 import { getCachedStudyAttributionBundle } from "@/utils/study-lineage-loader";
+
+const formatCompactRunDuration = (minutes: number | null | undefined): string => {
+  if (minutes === null || minutes === undefined || !Number.isFinite(minutes)) {
+    return "n/a";
+  }
+  const totalSeconds = Math.max(0, Math.round(minutes * 60));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const secs = totalSeconds % 60;
+  const totalMins = Math.floor(totalSeconds / 60);
+  if (totalMins < 60) return secs > 0 ? `${totalMins}m ${secs}s` : `${totalMins}m`;
+  const mins = totalMins % 60;
+  const hrs = Math.floor(totalMins / 60);
+  return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+};
 
 type StudyAttributionPageProps = {
   params: Promise<{ id: string }>;
@@ -93,12 +108,13 @@ export default async function StudyAttributionPage({
   const stagedPreviewCaptions = isZeroVoteStagingStudy
     ? (captionMetrics ?? []).slice(0, 6)
     : [];
+  const exportPayload = buildStudyExportPayload(bundle);
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
       <TopNavbar />
-      <main className="page-shell flex-1 p-4 text-foreground sm:p-6">
-        <section className="app-panel mx-auto w-full max-w-7xl space-y-5 rounded-2xl p-5 sm:p-6">
+      <main className="page-shell flex-1 p-3 text-foreground sm:p-6">
+        <section className="app-panel mx-auto w-full max-w-7xl space-y-4 rounded-2xl p-4 sm:space-y-5 sm:p-6">
           <StudySubNav
             study={study}
             studies={studies}
@@ -107,6 +123,7 @@ export default async function StudyAttributionPage({
             isTransitionalLikert={exposureBundle.isTransitionalLikert}
             excludeHighRisk={excludeHighRisk}
             highRiskVoterCount={exposureBundle.highRiskVoterCount}
+            actions={<StudyExportToolbar payload={exportPayload} />}
           />
 
           {mappedCaptionCount === 0 ? (
@@ -207,82 +224,82 @@ export default async function StudyAttributionPage({
             </>
           ) : (
             <>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <article className="app-card app-stat-card-teal flex min-w-0 flex-col rounded-xl p-4">
-                  <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+              <div className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
+                <article className="app-card app-stat-card-teal flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+                  <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                     Participants &amp; Completion
                   </p>
                   {participationFunnel.participationsStarted > 0 ? (
                     <>
-                      <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                        <p className="truncate text-2xl leading-8 font-semibold tabular-nums">
+                      <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                        <p className="truncate text-xl leading-7 font-semibold tabular-nums sm:text-2xl sm:leading-8">
                           {formatRatePercent(participationFunnel.completionRate)}
                         </p>
                       </div>
-                      <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
+                      <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
                         {participationFunnel.participationsEnded.toLocaleString()}{" "}
                         /{" "}
                         {participationFunnel.participationsStarted.toLocaleString()}{" "}
-                        finished · median{" "}
-                        {formatDurationFromMinutes(
+                        finished ·{" "}
+                        {formatCompactRunDuration(
                           participationFunnel.medianRunMinutes,
                         )}
                       </p>
                     </>
                   ) : (
                     <>
-                      <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                        <p className="truncate text-2xl leading-8 font-semibold tabular-nums">
+                      <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                        <p className="truncate text-xl leading-7 font-semibold tabular-nums sm:text-2xl sm:leading-8">
                           {exposureBundle.distinctVoters.toLocaleString()}{" "}
                           {exposureBundle.distinctVoters === 1
                             ? "voter"
                             : "voters"}
                         </p>
                       </div>
-                      <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
+                      <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
                         {avgExposuresPerVoter.toLocaleString()}{" "}
-                        {exposureBundle.exposureUnitLabel}/voter across{" "}
+                        {exposureBundle.exposureUnitLabel}/voter ·{" "}
                         {mappedCaptionCount.toLocaleString()} captions
                       </p>
                     </>
                   )}
                 </article>
 
-                <article className="app-card app-stat-card-sky flex min-w-0 flex-col rounded-xl p-4">
-                  <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+                <article className="app-card app-stat-card-sky flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+                  <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                     {studyRateKicker}
                   </p>
-                  <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                    <p className="truncate text-2xl leading-8 font-semibold tabular-nums">
+                  <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                    <p className="truncate text-xl leading-7 font-semibold tabular-nums sm:text-2xl sm:leading-8">
                       {formatRatePercent(studyRateCi.rate)}
                     </p>
                   </div>
-                  <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
+                  <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
                     {exposureBundle.totalExposures > 0 &&
                     studyRateCi.low !== null &&
                     studyRateCi.high !== null
-                      ? `${exposureBundle.totalPositive.toLocaleString()} / ${exposureBundle.totalExposures.toLocaleString()} ${exposureBundle.exposureUnitLabel} · 95% CI [${formatRatePercent(studyRateCi.low)}, ${formatRatePercent(studyRateCi.high)}]`
+                      ? `${exposureBundle.totalPositive.toLocaleString()}/${exposureBundle.totalExposures.toLocaleString()} · CI [${formatRatePercent(studyRateCi.low)}, ${formatRatePercent(studyRateCi.high)}]`
                       : `0 ${exposureBundle.exposureUnitLabel}`}
                   </p>
                 </article>
 
                 {isSingleFlavorScoredStudy ? (
                   <>
-                    <article className="app-card app-stat-card-amber flex min-w-0 flex-col rounded-xl p-4">
-                      <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+                    <article className="app-card app-stat-card-amber flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+                      <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                         Prompt Flavor &amp; Model
                       </p>
                       {topFlavor ? (
                         <>
-                          <div className="mt-2 flex min-h-8 min-w-0 items-center">
+                          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
                             <p
                               title={topFlavor.label}
-                              className="truncate font-mono text-sm leading-5 font-semibold sm:text-base sm:leading-6 xl:text-sm xl:leading-5"
+                              className="truncate font-mono text-xs leading-5 font-semibold sm:text-base sm:leading-6 xl:text-sm xl:leading-5"
                             >
                               {topFlavor.label}
                             </p>
                           </div>
-                          <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
+                          <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
                             {topModel?.label ??
                               topFlavor.dominantModelLabel ??
                               "Unattributed"}{" "}
@@ -291,18 +308,18 @@ export default async function StudyAttributionPage({
                               ? "caption"
                               : "captions"}
                             {topFlavor.stepCount
-                              ? ` · ${topFlavor.stepCount}-step chain`
+                              ? ` · ${topFlavor.stepCount}-step`
                               : ""}
                           </p>
                         </>
                       ) : (
                         <>
-                          <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                            <p className="truncate text-lg leading-7 font-semibold">
+                          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                            <p className="truncate text-base leading-6 font-semibold sm:text-lg sm:leading-7">
                               Manual captions
                             </p>
                           </div>
-                          <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
+                          <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
                             {mappedCaptionCount.toLocaleString()} unlinked study
                             captions
                           </p>
@@ -310,50 +327,50 @@ export default async function StudyAttributionPage({
                       )}
                     </article>
 
-                    <article className="app-card app-stat-card-rose flex min-w-0 flex-col rounded-xl p-4">
-                      <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+                    <article className="app-card app-stat-card-rose flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+                      <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                         Pacing &amp; Latency
                       </p>
                       {exposureBundle.medianStudyDwellMs !== null ? (
                         <>
-                          <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                            <p className="truncate text-2xl leading-8 font-semibold tabular-nums">
+                          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                            <p className="truncate text-xl leading-7 font-semibold tabular-nums sm:text-2xl sm:leading-8">
                               {formatDwellDurationLabel(
                                 exposureBundle.medianStudyDwellMs,
                               )}
                             </p>
                           </div>
-                          <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
-                            Median time per card
+                          <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
+                            Median per card
                             {topModel?.medianChainSeconds !== null &&
                             topModel?.medianChainSeconds !== undefined
-                              ? ` · ${formatChainSecondsLabel(topModel.medianChainSeconds)} generation chain`
+                              ? ` · ${formatChainSecondsLabel(topModel.medianChainSeconds)} chain`
                               : ` · ${mappedCaptionCount.toLocaleString()}-card deck`}
                           </p>
                         </>
                       ) : topModel?.medianChainSeconds !== null &&
                         topModel?.medianChainSeconds !== undefined ? (
                         <>
-                          <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                            <p className="truncate text-2xl leading-8 font-semibold tabular-nums">
+                          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                            <p className="truncate text-xl leading-7 font-semibold tabular-nums sm:text-2xl sm:leading-8">
                               {formatChainSecondsLabel(
                                 topModel.medianChainSeconds,
                               )}
                             </p>
                           </div>
-                          <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
-                            Median prompt-chain generation ·{" "}
+                          <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
+                            Median generation ·{" "}
                             {mappedCaptionCount.toLocaleString()}-card deck
                           </p>
                         </>
                       ) : (
                         <>
-                          <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                            <p className="truncate text-2xl leading-8 font-semibold tabular-nums">
+                          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                            <p className="truncate text-xl leading-7 font-semibold tabular-nums sm:text-2xl sm:leading-8">
                               {mappedCaptionCount.toLocaleString()} cards
                             </p>
                           </div>
-                          <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
+                          <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
                             {exposureBundle.mode === "swipe_navigation"
                               ? "Swipe card deck"
                               : "Rating-scale study deck"}
@@ -364,23 +381,22 @@ export default async function StudyAttributionPage({
                   </>
                 ) : (
                   <>
-                    <article className="app-card app-stat-card-amber flex min-w-0 flex-col rounded-xl p-4">
-                      <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+                    <article className="app-card app-stat-card-amber flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+                      <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                         Leading Prompt Flavor
                       </p>
                       {topFlavor ? (
                         <>
-                          <div className="mt-2 flex min-h-8 min-w-0 items-center">
+                          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
                             <p
                               title={topFlavor.label}
-                              className="truncate font-mono text-sm leading-5 font-semibold sm:text-base sm:leading-6 xl:text-sm xl:leading-5"
+                              className="truncate font-mono text-xs leading-5 font-semibold sm:text-base sm:leading-6 xl:text-sm xl:leading-5"
                             >
                               {topFlavor.label}
                             </p>
                           </div>
-                          <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
-                            {formatRatePercent(topFlavor.rate)} (CI low{" "}
-                            {formatRatePercent(topFlavor.ciLow)}) ·{" "}
+                          <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
+                            {formatRatePercent(topFlavor.rate)} ·{" "}
                             {topFlavor.sharedImageCount > 0 &&
                             topFlavor.meanLiftPp !== null
                               ? `${formatSignedLiftPp(topFlavor.meanLiftPp)} lift`
@@ -389,49 +405,49 @@ export default async function StudyAttributionPage({
                         </>
                       ) : (
                         <>
-                          <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                            <p className="truncate text-2xl leading-8 font-semibold tabular-nums">
+                          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                            <p className="truncate text-xl leading-7 font-semibold tabular-nums sm:text-2xl sm:leading-8">
                               —
                             </p>
                           </div>
-                          <p className="app-muted mt-1.5 text-xs leading-5">
+                          <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                             No attributed flavor exposures
                           </p>
                         </>
                       )}
                     </article>
 
-                    <article className="app-card app-stat-card-rose flex min-w-0 flex-col rounded-xl p-4">
-                      <p className="app-kicker text-xs leading-4 font-semibold uppercase tracking-wide">
+                    <article className="app-card app-stat-card-rose flex min-w-0 flex-col rounded-xl p-3 sm:p-4">
+                      <p className="app-kicker text-[11px] leading-4 font-semibold uppercase tracking-wide sm:text-xs">
                         Leading Synthesis Model
                       </p>
                       {topModel ? (
                         <>
-                          <div className="mt-2 flex min-h-8 min-w-0 items-center">
+                          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
                             <p
                               title={topModel.label}
-                              className="truncate text-lg leading-7 font-semibold"
+                              className="truncate text-base leading-6 font-semibold sm:text-lg sm:leading-7"
                             >
                               {topModel.label}
                             </p>
                           </div>
-                          <p className="app-muted mt-1.5 text-xs leading-5 tabular-nums">
-                            {formatRatePercent(topModel.rate)} across{" "}
+                          <p className="app-muted mt-1 text-[11px] leading-4 tabular-nums sm:mt-1.5 sm:text-xs sm:leading-5">
+                            {formatRatePercent(topModel.rate)} ·{" "}
                             {topModel.exposures.toLocaleString()}{" "}
                             {exposureBundle.exposureUnitLabel}
                             {topModel.medianChainSeconds !== null
-                              ? ` · ${formatChainSecondsLabel(topModel.medianChainSeconds)} chain`
+                              ? ` · ${formatChainSecondsLabel(topModel.medianChainSeconds)}`
                               : ""}
                           </p>
                         </>
                       ) : (
                         <>
-                          <div className="mt-2 flex min-h-8 min-w-0 items-center">
-                            <p className="truncate text-2xl leading-8 font-semibold tabular-nums">
+                          <div className="mt-1.5 flex min-h-7 min-w-0 items-center sm:mt-2 sm:min-h-8">
+                            <p className="truncate text-xl leading-7 font-semibold tabular-nums sm:text-2xl sm:leading-8">
                               —
                             </p>
                           </div>
-                          <p className="app-muted mt-1.5 text-xs leading-5">
+                          <p className="app-muted mt-1 text-[11px] leading-4 sm:mt-1.5 sm:text-xs sm:leading-5">
                             No attributed model exposures
                           </p>
                         </>

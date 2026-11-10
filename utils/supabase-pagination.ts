@@ -81,14 +81,18 @@ export async function mapWithConcurrency<TInput, TOutput>(
 export async function fetchAllRows<TRow>({
   contextLabel,
   pageSize = DEFAULT_QUERY_PAGE_SIZE,
+  concurrency = DEFAULT_QUERY_CONCURRENCY,
   retryAttempts = DEFAULT_RETRY_ATTEMPTS,
   retryBaseDelayMs = DEFAULT_RETRY_BASE_DELAY_MS,
+  countQuery,
   runQuery,
 }: {
   contextLabel: string;
   pageSize?: number;
+  concurrency?: number;
   retryAttempts?: number;
   retryBaseDelayMs?: number;
+  countQuery?: () => PromiseLike<SupabaseCountResult>;
   runQuery: (from: number, to: number) => PromiseLike<SupabaseListResult<TRow>>;
 }): Promise<TRow[]> {
   const safePageSize = Math.max(1, Math.floor(pageSize));
@@ -96,8 +100,71 @@ export async function fetchAllRows<TRow>({
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const rows: TRow[] = [];
-      let from = 0;
+      const firstResult = await runQuery(0, safePageSize - 1);
+      if (firstResult.error) {
+        throw new Error(firstResult.error.message);
+      }
+      const firstPage = firstResult.data ?? [];
+      if (firstPage.length < safePageSize) {
+        return firstPage;
+      }
+
+      if (countQuery) {
+        const countRes = await countQuery();
+        if (countRes.error) {
+          throw new Error(countRes.error.message);
+        }
+        const totalCount = countRes.count ?? 0;
+        if (totalCount <= safePageSize) {
+          return firstPage;
+        }
+
+        const remainingStarts: number[] = [];
+        for (
+          let offset = safePageSize;
+          offset < totalCount;
+          offset += safePageSize
+        ) {
+          remainingStarts.push(offset);
+        }
+        const tailPages = await mapWithConcurrency(
+          remainingStarts,
+          concurrency,
+          async (offset) => {
+            const pageRes = await runQuery(offset, offset + safePageSize - 1);
+            if (pageRes.error) {
+              throw new Error(pageRes.error.message);
+            }
+            return pageRes.data ?? [];
+          },
+        );
+
+        const rows: TRow[] = [...firstPage, ...tailPages.flat()];
+        const lastFetchedPage = tailPages[tailPages.length - 1] ?? [];
+        let nextOffset =
+          remainingStarts[remainingStarts.length - 1] + safePageSize;
+        if (lastFetchedPage.length === safePageSize) {
+          while (true) {
+            const extraRes = await runQuery(
+              nextOffset,
+              nextOffset + safePageSize - 1,
+            );
+            if (extraRes.error) {
+              throw new Error(extraRes.error.message);
+            }
+            const extraRows = extraRes.data ?? [];
+            rows.push(...extraRows);
+            if (extraRows.length < safePageSize) {
+              break;
+            }
+            nextOffset += safePageSize;
+          }
+        }
+        return rows;
+      }
+
+      const rows: TRow[] = [...firstPage];
+      let from = safePageSize;
 
       while (true) {
         const to = from + safePageSize - 1;
@@ -176,10 +243,15 @@ export async function fetchRowsByIdChunks<
 
           const pageRows = data ?? [];
           chunkRows.push(...pageRows);
-          if (pageRows.length < safePageSize) {
+          const maybeServerMaxRowCapped =
+            safePageSize > DEFAULT_QUERY_PAGE_SIZE &&
+            pageRows.length > 0 &&
+            pageRows.length % DEFAULT_QUERY_PAGE_SIZE === 0 &&
+            pageRows.length < safePageSize;
+          if (pageRows.length < safePageSize && !maybeServerMaxRowCapped) {
             return chunkRows;
           }
-          from += safePageSize;
+          from += pageRows.length;
         }
       } catch (error) {
         const message =

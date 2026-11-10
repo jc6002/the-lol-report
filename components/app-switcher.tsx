@@ -6,10 +6,10 @@ import Link from "next/link";
 const subscribe = () => () => undefined;
 
 const APPS = [
-  { id: "chucklesome", name: "Chucklesome", description: "Admin Area" },
-  { id: "toosoon", name: "Too Soon", description: "Matrix" },
-  { id: "lolreport", name: "The LOL Report", description: "Stats" },
-  { id: "puniversity", name: "Student Brain", description: "Puniversity" },
+  { id: "chucklesome", name: "Chucklesome", description: "Admin Studio" },
+  { id: "toosoon", name: "Prompt Chain Studio", description: "Too Soon Matrix" },
+  { id: "lolreport", name: "The LOL Report", description: "Attribution Studio" },
+  { id: "puniversity", name: "Student Brain", description: "Puniversity Arena" },
 ];
 
 export function AppSwitcher() {
@@ -23,8 +23,17 @@ export function AppSwitcher() {
         setIsOpen(false);
       }
     }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsOpen(false);
+      }
+    }
     document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
   }, []);
 
   const getAppUrl = (appId: string) => {
@@ -35,10 +44,10 @@ export function AppSwitcher() {
 
     if (isLocal) {
       switch (appId) {
-        case "chucklesome": return "http://localhost:3001";
-        case "toosoon": return "http://localhost:3003";
-        case "lolreport": return "http://localhost:3007";
-        case "puniversity": return "http://localhost:3000";
+        case "chucklesome": return `http://${host}:3001`;
+        case "toosoon": return `http://${host}:3002`;
+        case "lolreport": return `http://${host}:3007`;
+        case "puniversity": return `http://${host}:3000`;
       }
     }
 
@@ -51,7 +60,6 @@ export function AppSwitcher() {
       }
     }
 
-    // Production fallback
     switch (appId) {
       case "chucklesome": return "https://admin.crackd.ai";
       case "toosoon": return "https://matrix.crackd.ai";
@@ -64,8 +72,11 @@ export function AppSwitcher() {
   return (
     <div className="relative" ref={containerRef}>
       <button
+        type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="flex h-9 w-9 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+        aria-expanded={isOpen}
+        aria-haspopup="menu"
+        className="app-button flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-foreground transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         aria-label="App Switcher"
       >
         <svg
@@ -78,6 +89,7 @@ export function AppSwitcher() {
           strokeWidth="2"
           strokeLinecap="round"
           strokeLinejoin="round"
+          aria-hidden="true"
         >
           <rect width="7" height="7" x="3" y="3" rx="1" />
           <rect width="7" height="7" x="14" y="3" rx="1" />
@@ -87,20 +99,31 @@ export function AppSwitcher() {
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 top-full mt-2 w-80 origin-top-right overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-xl focus:outline-none z-50 dark:border-zinc-800 dark:bg-zinc-950">
-          <div className="border-b border-zinc-100 bg-zinc-50/50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900/50">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Apps</h3>
+        <div
+          role="menu"
+          aria-label="Humor Suite Apps"
+          className="absolute right-0 top-full z-50 mt-2 w-[min(20rem,calc(100vw-1.5rem))] origin-top-right overflow-hidden rounded-xl border border-slate-200/95 bg-[#fffaf5] text-foreground shadow-2xl focus:outline-none dark:border-cyan-200/18 dark:bg-[#0b1424]"
+        >
+          <div className="border-b border-slate-200/70 px-4 py-2.5 dark:border-slate-700/70">
+            <h3 className="app-muted text-xs font-semibold uppercase tracking-wider">
+              Humor Suite
+            </h3>
           </div>
           <div className="grid grid-cols-2 gap-2 p-3">
             {APPS.map((app) => (
               <Link
-                key={app.name}
+                key={app.id}
+                role="menuitem"
                 href={getAppUrl(app.id)}
-                className="flex flex-col items-center justify-center rounded-lg border border-zinc-100 bg-white p-4 text-center transition-all hover:border-zinc-300 hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-zinc-900 dark:bg-zinc-950 dark:hover:border-zinc-700 dark:hover:bg-zinc-900"
+                className="app-card flex flex-col items-center justify-center rounded-lg p-3.5 text-center transition hover:bg-slate-900/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:hover:bg-white/6"
                 onClick={() => setIsOpen(false)}
               >
-                <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{app.name}</span>
-                <span className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{app.description}</span>
+                <span className="text-xs font-semibold text-foreground sm:text-sm">
+                  {app.name}
+                </span>
+                <span className="app-muted mt-0.5 text-[11px]">
+                  {app.description}
+                </span>
               </Link>
             ))}
           </div>

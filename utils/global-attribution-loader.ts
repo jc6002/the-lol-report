@@ -24,6 +24,7 @@ import {
 } from "@/utils/study-exposure-adapter";
 import {
   buildFlavorLookupMaps,
+  type FlavorCrossStudyPoint,
   getStudyLifecycleStatus,
   getStudyTitle,
   type RawFlavorRow,
@@ -31,6 +32,7 @@ import {
   type RawModelRow,
   type RawProviderRow,
   resolveEffectiveCaptionFlavor,
+  seedFlavorTrajectoryCacheFromGlobalDataset,
   type StudyLifecycleStatus,
   type StudySummaryRow,
 } from "@/utils/study-lineage-loader";
@@ -42,6 +44,7 @@ import { getSupabasePublicEnv } from "@/utils/supabase/env";
 import { createClient } from "@/utils/supabase/server";
 import { isSuperadminProfile } from "@/utils/supabase/superadmin";
 import {
+  chunkArray,
   DEFAULT_QUERY_PAGE_SIZE,
   fetchAllRows,
   fetchExactCount,
@@ -151,6 +154,16 @@ export type GlobalFlavorLeaderboardRow = {
   pairWins: number;
   pairLosses: number;
   pairTies: number;
+  swipeSharedImageCount?: number;
+  swipeMeanLiftPp?: number | null;
+  swipePairWins?: number;
+  swipePairLosses?: number;
+  swipePairTies?: number;
+  ratingScaleSharedImageCount?: number;
+  ratingScaleMeanLiftPp?: number | null;
+  ratingScalePairWins?: number;
+  ratingScalePairLosses?: number;
+  ratingScalePairTies?: number;
   studies: GlobalFlavorStudyBreakdown[];
 };
 
@@ -167,6 +180,7 @@ export type GlobalModelStudyBreakdown = {
   formatDisplayLabel: StudyFormatDisplayLabel;
   role: "synthesis" | "pipeline_step";
   captionCount: number;
+  pipelineCaptionCount?: number;
   exposures: number;
   positive: number;
   rate: number | null;
@@ -182,18 +196,34 @@ export type GlobalModelLeaderboardRow = {
   providerName: string;
   primaryRole: "synthesis" | "pipeline_step";
   synthesisStudyCount: number;
+  synthesisSwipeStudyCount: number;
+  synthesisRatingScaleStudyCount: number;
   synthesisFlavorCount: number;
+  synthesisSwipeFlavorCount?: number;
+  synthesisRatingScaleFlavorCount?: number;
   synthesisCaptionCount: number;
   synthesisExposures: number;
   synthesisPositive: number;
+  synthesisSwipeExposures: number;
+  synthesisSwipePositive: number;
+  synthesisRatingScaleExposures: number;
+  synthesisRatingScalePositive: number;
   synthesisRate: number | null;
   synthesisCiLow: number | null;
   synthesisCiHigh: number | null;
   pipelineStudyCount: number;
+  pipelineSwipeStudyCount: number;
+  pipelineRatingScaleStudyCount: number;
   pipelineFlavorCount: number;
+  pipelineSwipeFlavorCount?: number;
+  pipelineRatingScaleFlavorCount?: number;
   pipelineCaptionCount: number;
   pipelineExposures: number;
   pipelinePositive: number;
+  pipelineSwipeExposures: number;
+  pipelineSwipePositive: number;
+  pipelineRatingScaleExposures: number;
+  pipelineRatingScalePositive: number;
   pipelineRate: number | null;
   pipelineCiLow: number | null;
   pipelineCiHigh: number | null;
@@ -297,6 +327,7 @@ type SwipeVoteRow = {
   id: number;
   profile_id: string;
   study_caption_mapping_id: number | null;
+  vote_value: StudyVoteValue;
   session_id: string | null;
 };
 
@@ -1336,10 +1367,15 @@ async function loadSharedGlobalFoundationUncached(
 const groupSwipeVotesByStudy = (
   swipeVoteRows: readonly SwipeVoteRow[],
   mappingById: ReadonlyMap<number, RawStudyMappingRow>,
-): Map<number, Array<SwipeVoteRow & { study_caption_mapping_id: number }>> => {
+): Map<
+  number,
+  Array<SwipeVoteRow & { study_caption_mapping_id: number; caption_id: string }>
+> => {
   const swipeVotesByStudy = new Map<
     number,
-    Array<SwipeVoteRow & { study_caption_mapping_id: number }>
+    Array<
+      SwipeVoteRow & { study_caption_mapping_id: number; caption_id: string }
+    >
   >();
   for (const vote of swipeVoteRows) {
     if (vote.study_caption_mapping_id === null) continue;
@@ -1350,7 +1386,11 @@ const groupSwipeVotesByStudy = (
       list = [];
       swipeVotesByStudy.set(m.study_id, list);
     }
-    list.push({ ...vote, study_caption_mapping_id: vote.study_caption_mapping_id });
+    list.push({
+      ...vote,
+      study_caption_mapping_id: vote.study_caption_mapping_id,
+      caption_id: m.caption_id,
+    });
   }
   return swipeVotesByStudy;
 };
@@ -1363,7 +1403,7 @@ const evaluateSwipeStudyExposures = ({
     CompactNavRow & { study_caption_mapping_id: number; caption_id: string }
   >;
   studyVotes: ReadonlyArray<
-    SwipeVoteRow & { study_caption_mapping_id: number }
+    SwipeVoteRow & { study_caption_mapping_id: number; caption_id: string }
   >;
 }): {
   voterCount: number;
@@ -1372,7 +1412,15 @@ const evaluateSwipeStudyExposures = ({
   captionTallies: Map<string, { exposures: number; positive: number }>;
 } => {
   const likeKeys = new Set<string>();
+  const likePairKeys = new Set<string>();
+  const positiveVoteByPairKey = new Map<
+    string,
+    SwipeVoteRow & { study_caption_mapping_id: number; caption_id: string }
+  >();
   for (const vote of studyVotes) {
+    if (!isPositiveStudyVote(vote.vote_value)) {
+      continue;
+    }
     likeKeys.add(
       getSwipeEventMatchKey({
         profile_id: vote.profile_id,
@@ -1380,6 +1428,11 @@ const evaluateSwipeStudyExposures = ({
         session_id: vote.session_id,
       }),
     );
+    const pairKey = `${vote.profile_id}|${vote.study_caption_mapping_id}`;
+    likePairKeys.add(pairKey);
+    if (!positiveVoteByPairKey.has(pairKey)) {
+      positiveVoteByPairKey.set(pairKey, vote);
+    }
   }
 
   const seenPairs = new Map<
@@ -1388,13 +1441,14 @@ const evaluateSwipeStudyExposures = ({
   >();
   for (const nav of studyNavs) {
     const pairKey = `${nav.profile_id}|${nav.study_caption_mapping_id}`;
-    const matchedLike = likeKeys.has(
-      getSwipeEventMatchKey({
-        profile_id: nav.profile_id,
-        study_caption_mapping_id: nav.study_caption_mapping_id,
-        session_id: nav.session_id,
-      }),
-    );
+    const matchedLike =
+      likeKeys.has(
+        getSwipeEventMatchKey({
+          profile_id: nav.profile_id,
+          study_caption_mapping_id: nav.study_caption_mapping_id,
+          session_id: nav.session_id,
+        }),
+      ) || likePairKeys.has(pairKey);
     const existing = seenPairs.get(pairKey);
     if (!existing) {
       seenPairs.set(pairKey, {
@@ -1405,6 +1459,17 @@ const evaluateSwipeStudyExposures = ({
     } else if (matchedLike) {
       existing.liked = true;
     }
+  }
+
+  for (const [pairKey, vote] of positiveVoteByPairKey.entries()) {
+    if (seenPairs.has(pairKey)) {
+      continue;
+    }
+    seenPairs.set(pairKey, {
+      profileId: vote.profile_id,
+      captionId: vote.caption_id,
+      liked: true,
+    });
   }
 
   const swipeVoters = new Set<string>();
@@ -1439,6 +1504,176 @@ const evaluateSwipeStudyExposures = ({
     captionTallies,
   };
 };
+
+async function skipScanDistinctVoteProfiles(
+  supabase: SupabaseClient<Database>,
+  limitQuery: ConcurrencyLimiter,
+): Promise<string[]> {
+  const distinctProfiles: string[] = [];
+  let cursor: string | null = null;
+  while (true) {
+    const rows = await runListQueryWithRetry<{ profile_id: string }>({
+      contextLabel: "distinct vote profiles skip-scan",
+      runQuery: () =>
+        limitQuery(() => {
+          let query = supabase
+            .from("study_caption_vote_events")
+            .select("profile_id");
+          if (cursor !== null) {
+            query = query.gt("profile_id", cursor);
+          }
+          return query
+            .order("profile_id", { ascending: true })
+            .limit(1) as PromiseLike<SupabaseListResult<{ profile_id: string }>>;
+        }),
+    });
+    const nextId = rows[0]?.profile_id;
+    if (typeof nextId !== "string" || nextId.length === 0) {
+      break;
+    }
+    distinctProfiles.push(nextId);
+    cursor = nextId;
+  }
+  return distinctProfiles;
+}
+
+async function computeDistinctVotersForLikertStudies({
+  supabase,
+  studies,
+  mappingsByStudy,
+  pageSize,
+  concurrency,
+  limitQuery,
+}: {
+  supabase: SupabaseClient<Database>;
+  studies: readonly number[];
+  mappingsByStudy: ReadonlyMap<number, readonly RawStudyMappingRow[]>;
+  pageSize: number;
+  concurrency: number;
+  limitQuery: ConcurrencyLimiter;
+}): Promise<Map<number, number>> {
+  const result = new Map<number, number>();
+  if (studies.length === 0) {
+    return result;
+  }
+
+  let distinctVoteProfilesPromise: Promise<string[]> | null = null;
+  const getDistinctVoteProfiles = (): Promise<string[]> => {
+    if (!distinctVoteProfilesPromise) {
+      distinctVoteProfilesPromise = skipScanDistinctVoteProfiles(
+        supabase,
+        limitQuery,
+      );
+    }
+    return distinctVoteProfilesPromise;
+  };
+
+  const perStudyCounts = await mapWithConcurrency(
+    studies,
+    concurrency,
+    async (studyId) => {
+      const mappingIds = (mappingsByStudy.get(studyId) ?? []).map((m) => m.id);
+      if (mappingIds.length === 0) {
+        return { studyId, voterCount: 0 };
+      }
+
+      const anchorIds = Array.from(
+        new Set([
+          mappingIds[0],
+          mappingIds[Math.floor(mappingIds.length / 2)],
+          mappingIds[mappingIds.length - 1],
+        ]),
+      );
+      const anchorSet = new Set(anchorIds);
+
+      const anchorRows = await fetchRowsByIdChunks<
+        number,
+        { id: number; profile_id: string }
+      >({
+        ids: anchorIds,
+        contextLabel: `likert anchor voters study ${studyId}`,
+        chunkSize: SWIPE_VOTE_MAPPING_CHUNK_SIZE,
+        pageSize,
+        concurrency,
+        runQuery: (chunk, from, to) =>
+          limitQuery(
+            () =>
+              supabase
+                .from("study_caption_vote_events")
+                .select("id, profile_id")
+                .in("study_caption_mapping_id", chunk)
+                .order("study_caption_mapping_id", { ascending: true })
+                .order("id", { ascending: true })
+                .range(from, to) as PromiseLike<
+                SupabaseListResult<{ id: number; profile_id: string }>
+              >,
+          ),
+      });
+
+      const foundVoters = new Set<string>();
+      for (const row of anchorRows) {
+        if (row.profile_id) {
+          foundVoters.add(row.profile_id);
+        }
+      }
+
+      const remainingMappings = mappingIds.filter((id) => !anchorSet.has(id));
+      if (remainingMappings.length === 0) {
+        return { studyId, voterCount: foundVoters.size };
+      }
+
+      const distinctVoteProfiles = await getDistinctVoteProfiles();
+      const remainingProfiles = distinctVoteProfiles.filter(
+        (pid) => !foundVoters.has(pid),
+      );
+
+      if (remainingMappings.length > 0 && remainingProfiles.length > 0) {
+        const mappingChunks = chunkArray(
+          remainingMappings,
+          SWIPE_VOTE_MAPPING_CHUNK_SIZE,
+        );
+        for (const mChunk of mappingChunks) {
+          const residualRows = await fetchRowsByIdChunks<
+            string,
+            { id: number; profile_id: string }
+          >({
+            ids: remainingProfiles,
+            contextLabel: `likert residual voters study ${studyId}`,
+            chunkSize: UUID_ID_CHUNK_SIZE,
+            pageSize,
+            concurrency,
+            runQuery: (pChunk, from, to) =>
+              limitQuery(
+                () =>
+                  supabase
+                    .from("study_caption_vote_events")
+                    .select("id, profile_id")
+                    .in("study_caption_mapping_id", mChunk)
+                    .in("profile_id", pChunk)
+                    .order("study_caption_mapping_id", { ascending: true })
+                    .order("id", { ascending: true })
+                    .range(from, to) as PromiseLike<
+                    SupabaseListResult<{ id: number; profile_id: string }>
+                  >,
+              ),
+          });
+          for (const row of residualRows) {
+            if (row.profile_id) {
+              foundVoters.add(row.profile_id);
+            }
+          }
+        }
+      }
+
+      return { studyId, voterCount: foundVoters.size };
+    },
+  );
+
+  for (const { studyId, voterCount } of perStudyCounts) {
+    result.set(studyId, voterCount);
+  }
+  return result;
+}
 
 const summarizeStudyParticipations = (
   studyParts: readonly RawStudyParticipationRow[],
@@ -1592,7 +1827,9 @@ async function loadFastStudyHubCatalogUncached(
           () =>
             supabase
               .from("study_caption_vote_events")
-              .select("id, profile_id, study_caption_mapping_id, session_id")
+              .select(
+                "id, profile_id, study_caption_mapping_id, vote_value, session_id",
+              )
               .in("study_caption_mapping_id", chunk)
               .order("study_caption_mapping_id", { ascending: true })
               .order("id", { ascending: true })
@@ -1649,6 +1886,24 @@ async function loadFastStudyHubCatalogUncached(
     likertStudyCounts.map((item) => [item.studyId, item]),
   );
 
+  const likertStudiesMissingParticipants = likertStudyCounts
+    .filter((item) => {
+      if (item.exposures <= 0) return false;
+      const parts = base.participationsByStudy.get(item.studyId) ?? [];
+      return parts.length === 0;
+    })
+    .map((item) => item.studyId);
+
+  const likertFallbackVotersByStudy =
+    await computeDistinctVotersForLikertStudies({
+      supabase,
+      studies: likertStudiesMissingParticipants,
+      mappingsByStudy: base.mappingsByStudy,
+      pageSize,
+      concurrency,
+      limitQuery,
+    });
+
   type FastFlavorAcc = {
     flavor: RawFlavorRow;
     studyIds: Set<number>;
@@ -1699,17 +1954,23 @@ async function loadFastStudyHubCatalogUncached(
       { exposures: number; positive: number }
     > | null = null;
 
-    if (resolvedEra.mode === "swipe_navigation" && studyNavs.length > 0) {
-      const evaluated = evaluateSwipeStudyExposures({
-        studyNavs,
-        studyVotes: swipeVotesByStudy.get(study.id) ?? [],
-      });
-      voterCount = evaluated.voterCount;
-      studyExposures = evaluated.studyExposures;
-      studyPositive = evaluated.studyPositive;
-      swipeCaptionTallies = evaluated.captionTallies;
+    if (resolvedEra.mode === "swipe_navigation") {
+      const studyVotes = swipeVotesByStudy.get(study.id) ?? [];
+      if (studyNavs.length > 0 || studyVotes.length > 0) {
+        const evaluated = evaluateSwipeStudyExposures({
+          studyNavs,
+          studyVotes,
+        });
+        voterCount = evaluated.voterCount;
+        studyExposures = evaluated.studyExposures;
+        studyPositive = evaluated.studyPositive;
+        swipeCaptionTallies = evaluated.captionTallies;
+      }
     } else if (likertTot.exposures > 0) {
-      voterCount = partSummary.distinctParticipants;
+      voterCount =
+        partSummary.distinctParticipants > 0
+          ? partSummary.distinctParticipants
+          : (likertFallbackVotersByStudy.get(study.id) ?? 0);
       studyExposures = likertTot.exposures;
       studyPositive = likertTot.positive;
     }
@@ -2095,7 +2356,9 @@ async function loadGlobalAttributionDatasetUncached(
             () =>
               supabase
                 .from("study_caption_vote_events")
-                .select("id, profile_id, study_caption_mapping_id, session_id")
+                .select(
+                  "id, profile_id, study_caption_mapping_id, vote_value, session_id",
+                )
                 .in("study_caption_mapping_id", chunk)
                 .order("study_caption_mapping_id", { ascending: true })
                 .order("id", { ascending: true })
@@ -2223,6 +2486,34 @@ async function loadGlobalAttributionDatasetUncached(
     });
   }
 
+  const tier2LikertStudiesMissingParticipants: number[] = [];
+  for (const study of liveStudies) {
+    const studyNavs = base.navsByStudy.get(study.id) ?? [];
+    if (study.id >= NEW_STYLE_MIN_STUDY_ID && studyNavs.length > 0) {
+      continue;
+    }
+    const sharedExp = sharedTotalsByStudy.get(study.id)?.exposures ?? 0;
+    const nonSharedExp = (nonSharedTalliesByStudy.get(study.id) ?? []).reduce(
+      (sum, item) => sum + item.exposures,
+      0,
+    );
+    const totalExp = sharedExp + nonSharedExp;
+    const parts = base.participationsByStudy.get(study.id) ?? [];
+    if (totalExp > 0 && parts.length === 0) {
+      tier2LikertStudiesMissingParticipants.push(study.id);
+    }
+  }
+
+  const likertFallbackVotersByStudy =
+    await computeDistinctVotersForLikertStudies({
+      supabase,
+      studies: tier2LikertStudiesMissingParticipants,
+      mappingsByStudy: base.mappingsByStudy,
+      pageSize,
+      concurrency,
+      limitQuery,
+    });
+
   type MutableFlavorStudyPoint = {
     studyId: number;
     captionIds: Set<string>;
@@ -2247,6 +2538,16 @@ async function loadGlobalAttributionDatasetUncached(
     wins: number;
     losses: number;
     ties: number;
+    swipeSharedImageKeys: Set<string>;
+    swipeLifts: number[];
+    swipeWins: number;
+    swipeLosses: number;
+    swipeTies: number;
+    ratingScaleSharedImageKeys: Set<string>;
+    ratingScaleLifts: number[];
+    ratingScaleWins: number;
+    ratingScaleLosses: number;
+    ratingScaleTies: number;
   };
   const flavorAccById = new Map<number, MutableFlavorAcc>();
   const getFlavorAcc = (flavor: RawFlavorRow): MutableFlavorAcc => {
@@ -2269,6 +2570,16 @@ async function loadGlobalAttributionDatasetUncached(
         wins: 0,
         losses: 0,
         ties: 0,
+        swipeSharedImageKeys: new Set<string>(),
+        swipeLifts: [],
+        swipeWins: 0,
+        swipeLosses: 0,
+        swipeTies: 0,
+        ratingScaleSharedImageKeys: new Set<string>(),
+        ratingScaleLifts: [],
+        ratingScaleWins: 0,
+        ratingScaleLosses: 0,
+        ratingScaleTies: 0,
       };
       flavorAccById.set(flavor.id, acc);
     }
@@ -2289,15 +2600,31 @@ async function loadGlobalAttributionDatasetUncached(
     model: RawModelRow;
     studies: Map<number, MutableModelStudyPoint>;
     synthStudyIds: Set<number>;
+    synthSwipeStudyIds: Set<number>;
+    synthRatingScaleStudyIds: Set<number>;
     synthFlavorIds: Set<number>;
+    synthSwipeFlavorIds: Set<number>;
+    synthRatingScaleFlavorIds: Set<number>;
     synthCaptionIds: Set<string>;
     synthExposures: number;
     synthPositive: number;
+    synthSwipeExposures: number;
+    synthSwipePositive: number;
+    synthRatingScaleExposures: number;
+    synthRatingScalePositive: number;
     pipeStudyIds: Set<number>;
+    pipeSwipeStudyIds: Set<number>;
+    pipeRatingScaleStudyIds: Set<number>;
     pipeFlavorIds: Set<number>;
+    pipeSwipeFlavorIds: Set<number>;
+    pipeRatingScaleFlavorIds: Set<number>;
     pipeCaptionIds: Set<string>;
     pipeExposures: number;
     pipePositive: number;
+    pipeSwipeExposures: number;
+    pipeSwipePositive: number;
+    pipeRatingScaleExposures: number;
+    pipeRatingScalePositive: number;
     chainLatencies: number[];
   };
   const modelAccById = new Map<number, MutableModelAcc>();
@@ -2308,15 +2635,31 @@ async function loadGlobalAttributionDatasetUncached(
         model,
         studies: new Map<number, MutableModelStudyPoint>(),
         synthStudyIds: new Set<number>(),
+        synthSwipeStudyIds: new Set<number>(),
+        synthRatingScaleStudyIds: new Set<number>(),
         synthFlavorIds: new Set<number>(),
+        synthSwipeFlavorIds: new Set<number>(),
+        synthRatingScaleFlavorIds: new Set<number>(),
         synthCaptionIds: new Set<string>(),
         synthExposures: 0,
         synthPositive: 0,
+        synthSwipeExposures: 0,
+        synthSwipePositive: 0,
+        synthRatingScaleExposures: 0,
+        synthRatingScalePositive: 0,
         pipeStudyIds: new Set<number>(),
+        pipeSwipeStudyIds: new Set<number>(),
+        pipeRatingScaleStudyIds: new Set<number>(),
         pipeFlavorIds: new Set<number>(),
+        pipeSwipeFlavorIds: new Set<number>(),
+        pipeRatingScaleFlavorIds: new Set<number>(),
         pipeCaptionIds: new Set<string>(),
         pipeExposures: 0,
         pipePositive: 0,
+        pipeSwipeExposures: 0,
+        pipeSwipePositive: 0,
+        pipeRatingScaleExposures: 0,
+        pipeRatingScalePositive: 0,
         chainLatencies: [],
       };
       modelAccById.set(model.id, acc);
@@ -2368,6 +2711,13 @@ async function loadGlobalAttributionDatasetUncached(
       const mAcc = getModelAcc(model);
       mAcc.pipeExposures += exposures;
       mAcc.pipePositive += positive;
+      if (mode === "swipe_navigation") {
+        mAcc.pipeSwipeExposures += exposures;
+        mAcc.pipeSwipePositive += positive;
+      } else {
+        mAcc.pipeRatingScaleExposures += exposures;
+        mAcc.pipeRatingScalePositive += positive;
+      }
       const mPoint = mAcc.studies.get(studyId);
       if (mPoint) {
         mPoint.pipeExposures += exposures;
@@ -2381,6 +2731,13 @@ async function loadGlobalAttributionDatasetUncached(
         const mAcc = getModelAcc(tModel);
         mAcc.synthExposures += exposures;
         mAcc.synthPositive += positive;
+        if (mode === "swipe_navigation") {
+          mAcc.synthSwipeExposures += exposures;
+          mAcc.synthSwipePositive += positive;
+        } else {
+          mAcc.synthRatingScaleExposures += exposures;
+          mAcc.synthRatingScalePositive += positive;
+        }
         const mPoint = mAcc.studies.get(studyId);
         if (mPoint) {
           mPoint.synthExposures += exposures;
@@ -2482,9 +2839,19 @@ async function loadGlobalAttributionDatasetUncached(
           studyModelNames.add(model.name);
           const mAcc = getModelAcc(model);
           mAcc.pipeStudyIds.add(study.id);
+          if (resolvedEra.mode === "swipe_navigation") {
+            mAcc.pipeSwipeStudyIds.add(study.id);
+          } else {
+            mAcc.pipeRatingScaleStudyIds.add(study.id);
+          }
           mAcc.pipeCaptionIds.add(captionId);
           if (lineage.flavorId !== null) {
             mAcc.pipeFlavorIds.add(lineage.flavorId);
+            if (resolvedEra.mode === "swipe_navigation") {
+              mAcc.pipeSwipeFlavorIds.add(lineage.flavorId);
+            } else {
+              mAcc.pipeRatingScaleFlavorIds.add(lineage.flavorId);
+            }
           }
           let mPoint = mAcc.studies.get(study.id);
           if (!mPoint) {
@@ -2517,9 +2884,19 @@ async function loadGlobalAttributionDatasetUncached(
           if (tModel) {
             const mAcc = getModelAcc(tModel);
             mAcc.synthStudyIds.add(study.id);
+            if (resolvedEra.mode === "swipe_navigation") {
+              mAcc.synthSwipeStudyIds.add(study.id);
+            } else {
+              mAcc.synthRatingScaleStudyIds.add(study.id);
+            }
             mAcc.synthCaptionIds.add(captionId);
             if (lineage.flavorId !== null) {
               mAcc.synthFlavorIds.add(lineage.flavorId);
+              if (resolvedEra.mode === "swipe_navigation") {
+                mAcc.synthSwipeFlavorIds.add(lineage.flavorId);
+              } else {
+                mAcc.synthRatingScaleFlavorIds.add(lineage.flavorId);
+              }
             }
             const mPoint = mAcc.studies.get(study.id);
             if (mPoint) {
@@ -2542,27 +2919,33 @@ async function loadGlobalAttributionDatasetUncached(
     let studyExposures = 0;
     let studyPositive = 0;
 
-    if (resolvedEra.mode === "swipe_navigation" && studyNavs.length > 0) {
-      const evaluated = evaluateSwipeStudyExposures({
-        studyNavs,
-        studyVotes: swipeVotesByStudy.get(study.id) ?? [],
-      });
-      voterCount = evaluated.voterCount;
-      studyExposures = evaluated.studyExposures;
-      studyPositive = evaluated.studyPositive;
-
-      for (const [capId, tally] of evaluated.captionTallies.entries()) {
-        captionTalliesForLift.set(capId, tally);
-        addLineageExposureContribution({
-          studyId: study.id,
-          lineage: base.lineageByCaptionId.get(capId),
-          exposures: tally.exposures,
-          positive: tally.positive,
-          mode: resolvedEra.mode,
+    if (resolvedEra.mode === "swipe_navigation") {
+      const studyVotes = swipeVotesByStudy.get(study.id) ?? [];
+      if (studyNavs.length > 0 || studyVotes.length > 0) {
+        const evaluated = evaluateSwipeStudyExposures({
+          studyNavs,
+          studyVotes,
         });
+        voterCount = evaluated.voterCount;
+        studyExposures = evaluated.studyExposures;
+        studyPositive = evaluated.studyPositive;
+
+        for (const [capId, tally] of evaluated.captionTallies.entries()) {
+          captionTalliesForLift.set(capId, tally);
+          addLineageExposureContribution({
+            studyId: study.id,
+            lineage: base.lineageByCaptionId.get(capId),
+            exposures: tally.exposures,
+            positive: tally.positive,
+            mode: resolvedEra.mode,
+          });
+        }
       }
     } else if (likertExpTotal > 0) {
-      voterCount = partSummary.distinctParticipants;
+      voterCount =
+        partSummary.distinctParticipants > 0
+          ? partSummary.distinctParticipants
+          : (likertFallbackVotersByStudy.get(study.id) ?? 0);
       studyExposures = likertExpTotal;
       studyPositive = likertPosTotal;
 
@@ -2630,17 +3013,35 @@ async function loadGlobalAttributionDatasetUncached(
       }
 
       sharedImagePairCount += 1;
-      const imageMean =
-        evaluatedCards.reduce((sum, card) => sum + card.rate, 0) /
-        evaluatedCards.length;
+      const flavorSums = new Map<string, { sum: number; count: number }>();
+      for (const card of evaluatedCards) {
+        const entry = flavorSums.get(card.flavorKey) ?? { sum: 0, count: 0 };
+        entry.sum += card.rate;
+        entry.count += 1;
+        flavorSums.set(card.flavorKey, entry);
+      }
+      let sumOfFlavorMeans = 0;
+      for (const entry of flavorSums.values()) {
+        sumOfFlavorMeans += entry.sum / entry.count;
+      }
+      const imageMean = sumOfFlavorMeans / flavorSums.size;
 
+      const isSwipeStudy = resolvedEra.mode === "swipe_navigation";
       for (const card of evaluatedCards) {
         if (card.flavorId === null) continue;
         const fAcc = flavorAccById.get(card.flavorId);
         if (!fAcc) continue;
         const residual = card.rate - imageMean;
-        fAcc.sharedImageKeys.add(`${study.id}|${imageId}`);
+        const sharedImgKey = `${study.id}|${imageId}`;
+        fAcc.sharedImageKeys.add(sharedImgKey);
         fAcc.lifts.push(residual);
+        if (isSwipeStudy) {
+          fAcc.swipeSharedImageKeys.add(sharedImgKey);
+          fAcc.swipeLifts.push(residual);
+        } else {
+          fAcc.ratingScaleSharedImageKeys.add(sharedImgKey);
+          fAcc.ratingScaleLifts.push(residual);
+        }
         fAcc.studies.get(study.id)?.lifts.push(residual);
       }
 
@@ -2659,14 +3060,38 @@ async function loadGlobalAttributionDatasetUncached(
               : undefined;
           const diff = left.rate - right.rate;
           if (Math.abs(diff) <= TIE_EPSILON) {
-            if (leftAcc) leftAcc.ties += 1;
-            if (rightAcc) rightAcc.ties += 1;
+            if (leftAcc) {
+              leftAcc.ties += 1;
+              if (isSwipeStudy) leftAcc.swipeTies += 1;
+              else leftAcc.ratingScaleTies += 1;
+            }
+            if (rightAcc) {
+              rightAcc.ties += 1;
+              if (isSwipeStudy) rightAcc.swipeTies += 1;
+              else rightAcc.ratingScaleTies += 1;
+            }
           } else if (diff > 0) {
-            if (leftAcc) leftAcc.wins += 1;
-            if (rightAcc) rightAcc.losses += 1;
+            if (leftAcc) {
+              leftAcc.wins += 1;
+              if (isSwipeStudy) leftAcc.swipeWins += 1;
+              else leftAcc.ratingScaleWins += 1;
+            }
+            if (rightAcc) {
+              rightAcc.losses += 1;
+              if (isSwipeStudy) rightAcc.swipeLosses += 1;
+              else rightAcc.ratingScaleLosses += 1;
+            }
           } else {
-            if (leftAcc) leftAcc.losses += 1;
-            if (rightAcc) rightAcc.wins += 1;
+            if (leftAcc) {
+              leftAcc.losses += 1;
+              if (isSwipeStudy) leftAcc.swipeLosses += 1;
+              else leftAcc.ratingScaleLosses += 1;
+            }
+            if (rightAcc) {
+              rightAcc.wins += 1;
+              if (isSwipeStudy) rightAcc.swipeWins += 1;
+              else rightAcc.ratingScaleWins += 1;
+            }
           }
         }
       }
@@ -2760,15 +3185,18 @@ async function loadGlobalAttributionDatasetUncached(
       primarySynthesisModel = pipelineSteps[pipelineSteps.length - 1];
     }
 
-    const meanLiftPp =
-      acc.lifts.length > 0
+    const computeLiftAveragePp = (values: readonly number[]): number | null =>
+      values.length > 0
         ? Number(
             (
-              (acc.lifts.reduce((sum, val) => sum + val, 0) / acc.lifts.length) *
+              (values.reduce((sum, val) => sum + val, 0) / values.length) *
               100
             ).toFixed(4),
           )
         : null;
+    const meanLiftPp = computeLiftAveragePp(acc.lifts);
+    const swipeMeanLiftPp = computeLiftAveragePp(acc.swipeLifts);
+    const ratingScaleMeanLiftPp = computeLiftAveragePp(acc.ratingScaleLifts);
 
     let scoredStudyCount = 0;
     let swipeStudyCount = 0;
@@ -2835,9 +3263,7 @@ async function loadGlobalAttributionDatasetUncached(
       slug: acc.flavor.slug,
       description: acc.flavor.description,
       stepCount:
-        configuredSteps.length > 0
-          ? configuredSteps.length
-          : pipelineSteps.length,
+        pipelineSteps.length > 0 ? pipelineSteps.length : configuredSteps.length,
       primarySynthesisModel,
       pipelineSteps,
       studyCount: studyBreakdowns.length,
@@ -2859,6 +3285,16 @@ async function loadGlobalAttributionDatasetUncached(
       pairWins: acc.wins,
       pairLosses: acc.losses,
       pairTies: acc.ties,
+      swipeSharedImageCount: acc.swipeSharedImageKeys.size,
+      swipeMeanLiftPp,
+      swipePairWins: acc.swipeWins,
+      swipePairLosses: acc.swipeLosses,
+      swipePairTies: acc.swipeTies,
+      ratingScaleSharedImageCount: acc.ratingScaleSharedImageKeys.size,
+      ratingScaleMeanLiftPp,
+      ratingScalePairWins: acc.ratingScaleWins,
+      ratingScalePairLosses: acc.ratingScaleLosses,
+      ratingScalePairTies: acc.ratingScaleTies,
       studies: studyBreakdowns,
     });
   }
@@ -2923,6 +3359,7 @@ async function loadGlobalAttributionDatasetUncached(
         formatDisplayLabel: studyMeta.formatDisplayLabel,
         role,
         captionCount,
+        pipelineCaptionCount: point.pipeCaptionIds.size,
         exposures,
         positive,
         rate: pointCi.rate,
@@ -2954,18 +3391,34 @@ async function loadGlobalAttributionDatasetUncached(
         base.providersById.get(acc.model.llm_provider_id)?.name ?? "Unknown",
       primaryRole,
       synthesisStudyCount: acc.synthStudyIds.size,
+      synthesisSwipeStudyCount: acc.synthSwipeStudyIds.size,
+      synthesisRatingScaleStudyCount: acc.synthRatingScaleStudyIds.size,
       synthesisFlavorCount: acc.synthFlavorIds.size,
+      synthesisSwipeFlavorCount: acc.synthSwipeFlavorIds.size,
+      synthesisRatingScaleFlavorCount: acc.synthRatingScaleFlavorIds.size,
       synthesisCaptionCount: acc.synthCaptionIds.size,
       synthesisExposures: acc.synthExposures,
       synthesisPositive: acc.synthPositive,
+      synthesisSwipeExposures: acc.synthSwipeExposures,
+      synthesisSwipePositive: acc.synthSwipePositive,
+      synthesisRatingScaleExposures: acc.synthRatingScaleExposures,
+      synthesisRatingScalePositive: acc.synthRatingScalePositive,
       synthesisRate: synthCi.rate,
       synthesisCiLow: synthCi.low,
       synthesisCiHigh: synthCi.high,
       pipelineStudyCount: acc.pipeStudyIds.size,
+      pipelineSwipeStudyCount: acc.pipeSwipeStudyIds.size,
+      pipelineRatingScaleStudyCount: acc.pipeRatingScaleStudyIds.size,
       pipelineFlavorCount: acc.pipeFlavorIds.size,
+      pipelineSwipeFlavorCount: acc.pipeSwipeFlavorIds.size,
+      pipelineRatingScaleFlavorCount: acc.pipeRatingScaleFlavorIds.size,
       pipelineCaptionCount: acc.pipeCaptionIds.size,
       pipelineExposures: acc.pipeExposures,
       pipelinePositive: acc.pipePositive,
+      pipelineSwipeExposures: acc.pipeSwipeExposures,
+      pipelineSwipePositive: acc.pipeSwipePositive,
+      pipelineRatingScaleExposures: acc.pipeRatingScaleExposures,
+      pipelineRatingScalePositive: acc.pipeRatingScalePositive,
       pipelineRate: pipeCi.rate,
       pipelineCiLow: pipeCi.low,
       pipelineCiHigh: pipeCi.high,
@@ -3110,6 +3563,7 @@ async function fetchWithSuperadminSwrCache<TValue>({
     nowMs?: number;
     pageSize?: number;
     concurrency?: number;
+    verifiedSuperadmin?: boolean;
   };
   loadUncached: (
     liveStudies: readonly StudySummaryRow[],
@@ -3131,7 +3585,9 @@ async function fetchWithSuperadminSwrCache<TValue>({
   // callers and bare mock clients without auth.getUser bypass the shared cache entirely.
   const [isVerifiedSuperadmin, liveStudies] = await Promise.all([
     normalizedCacheKey.length > 0
-      ? verifyLiveSuperadminForSharedCache(supabase)
+      ? options?.verifiedSuperadmin === true
+        ? Promise.resolve(true)
+        : verifyLiveSuperadminForSharedCache(supabase)
       : Promise.resolve(false),
     fetchLiveStudiesList(supabase),
   ]);
@@ -3245,6 +3701,7 @@ export async function fetchFastStudyHubCatalogWithClient(
     nowMs?: number;
     pageSize?: number;
     concurrency?: number;
+    verifiedSuperadmin?: boolean;
   },
 ): Promise<FastStudyHubCatalog> {
   return fetchWithSuperadminSwrCache({
@@ -3296,6 +3753,35 @@ export async function fetchGlobalAttributionDatasetWithClient(
         value: projected,
         inFlight: existingFast?.inFlight,
       });
+      const studyById = new Map(value.studies.map((s) => [s.id, s]));
+      seedFlavorTrajectoryCacheFromGlobalDataset(
+        cacheKey,
+        freshUntilMs - GLOBAL_CACHE_TTL_MS,
+        value.flavors.map((flavor) => ({
+          flavorId: flavor.flavorId,
+          points: [...flavor.studies]
+            .sort((a, b) => a.studyId - b.studyId)
+            .map((s): FlavorCrossStudyPoint => {
+              const rawStudy = studyById.get(s.studyId);
+              return {
+                studyId: s.studyId,
+                studySlug: s.studySlug,
+                studyLabel: rawStudy
+                  ? `#${s.studyId} · ${rawStudy.rawTitle}`
+                  : `#${s.studyId} · ${s.studyTitle}`,
+                exposureMode: s.exposureMode,
+                formatLabel:
+                  s.exposureMode === "swipe_navigation" ? "Swipe" : "Likert",
+                captionCount: s.captionCount,
+                exposures: s.exposures,
+                positive: s.positive,
+                rate: s.rate,
+                ciLow: s.ciLow,
+                ciHigh: s.ciHigh,
+              };
+            }),
+        })),
+      );
     },
   });
 }

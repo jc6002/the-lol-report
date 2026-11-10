@@ -2,9 +2,13 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { AppFormSelect } from "@/components/app-select";
+import { LocalStudyWindow } from "@/components/local-study-window";
 import { ReportLoadForm } from "@/components/report-load-form";
 import { StudyVoteTimingTable } from "@/components/study-vote-timing-table";
+import { TopNavbar } from "@/components/top-navbar";
 import type { Database, Tables } from "@/src/types/supabase";
+import { formatStudySwitcherOption } from "@/utils/attribution-ui-helpers";
 import { formatDurationFromMinutes } from "@/utils/format-duration";
 import { createClient } from "@/utils/supabase/server";
 import type { StudyCaptionVoteEventRow } from "@/utils/study-vote-events";
@@ -255,25 +259,6 @@ const fetchRowsWithAdaptiveChunks = async <TRow,>({
   }
 
   return rows;
-};
-
-const getStudyLabel = (study: StudySummary) => {
-  if (study.slug) {
-    return `${study.id} - ${study.slug}`;
-  }
-
-  if (study.description) {
-    return `${study.id} - ${study.description}`;
-  }
-
-  return `Study ${study.id}`;
-};
-
-const formatStudyWindow = (study: StudySummary) => {
-  const start = study.start_datetime_utc ?? study.created_datetime_utc;
-  const end = study.end_datetime_utc ?? "n/a";
-
-  return `${start} to ${end}`;
 };
 
 const getEffectiveStudyStart = (study: StudySummary): StudyStartInfo => ({
@@ -562,78 +547,86 @@ export default async function StudyVoteTimingPage({
   const medianVotingSpanMinutes = computeMedian(
     selectedReport?.user_summaries.map((summary) => summary.voting_span_minutes) ?? [],
   );
+  const studySelectOptions = studies.map((study) =>
+    formatStudySwitcherOption({
+      id: study.id,
+      slug: study.slug,
+      description: study.description,
+    }),
+  );
 
   return (
-    <main className="page-shell min-h-screen p-6 text-foreground">
-      <section className="app-panel mx-auto w-full max-w-7xl space-y-6 rounded-2xl p-6">
-        <header className="space-y-2">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+    <div className="flex min-h-screen flex-col bg-background">
+      <TopNavbar />
+      <main className="page-shell flex-1 p-4 text-foreground sm:p-6">
+        <section className="app-panel mx-auto w-full max-w-7xl space-y-6 rounded-2xl p-5 sm:p-6">
+          <header className="space-y-2.5">
             <div>
-              <p className="app-kicker text-xs font-semibold uppercase tracking-[0.24em]">
-                Humor Study Stats
-              </p>
-              <h1 className="text-2xl font-semibold">Study Voting Span by User</h1>
-            </div>
-            <Link
-              href="/"
-              className="app-button inline-flex rounded-lg px-3 py-2 text-sm font-medium transition"
-            >
-              Home
-            </Link>
-          </div>
-          <p className="app-muted text-sm">
-            Primary metric: <code>last_vote_at_utc - first_vote_at_utc</code> in minutes for each
-            user within each study. Default order is fastest to slowest voting span. Click a
-            column header to sort.
-          </p>
-          <ReportLoadForm
-            disabled={studies.length === 0}
-            className="flex flex-wrap items-end gap-3"
-            pathBuilder={{
-              fieldName: "studyId",
-              prefix: "/study",
-              suffix: "vote-timing",
-            }}
-          >
-            <label className="app-muted space-y-1 text-sm">
-              <span className="block">Study</span>
-              <select
-                name="studyId"
-                defaultValue={requestedStudyId.toString()}
-                disabled={studies.length === 0}
-                className="app-input h-9 min-w-80 rounded-md px-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-60"
+              <Link
+                href={`/study/${requestedStudyId}/attribution`}
+                className="app-kicker inline-flex items-center gap-1 py-1 text-xs font-semibold hover:underline"
               >
-                {studies.map((study) => (
-                  <option key={study.id} value={study.id}>
-                    {getStudyLabel(study)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="app-muted space-y-1 text-sm">
-              <span className="block">Min votes per user</span>
-              <input
-                type="number"
-                name="minVotes"
-                min={1}
-                max={MAX_MIN_VOTES}
-                defaultValue={minVotesResult.value}
-                className="app-input h-9 w-44 rounded-md px-2 text-sm outline-none"
-              />
-            </label>
-          </ReportLoadForm>
-          {!minVotesResult.isValid && params.minVotes ? (
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              Invalid <code>minVotes</code> value. Using default of {DEFAULT_MIN_VOTES}.
-            </p>
-          ) : null}
-          {selectedReport ? (
+                ← Back to Study #{requestedStudyId} Studio
+              </Link>
+              <h1 className="mt-0.5 text-2xl font-semibold">Study Voting Span by User</h1>
+            </div>
             <p className="app-muted text-sm">
-              Study window: {formatStudyWindow(selectedReport.study)} | Timer start:{" "}
-              {selectedReport.study_started_at_utc} ({selectedReport.study_start_source})
+              Elapsed time from each participant&apos;s first recorded vote to their final vote, ordered from fastest to slowest.
             </p>
-          ) : null}
-        </header>
+            <ReportLoadForm
+              disabled={studies.length === 0}
+              className="flex flex-wrap items-end gap-3"
+              pathBuilder={{
+                fieldName: "studyId",
+                prefix: "/study",
+                suffix: "vote-timing",
+              }}
+            >
+              <div className="app-muted w-full space-y-1 text-sm sm:w-auto">
+                <span className="block">Study</span>
+                <AppFormSelect
+                  name="studyId"
+                  ariaLabel="Study"
+                  submitOnChange
+                  defaultValue={requestedStudyId.toString()}
+                  options={studySelectOptions}
+                  disabled={studies.length === 0}
+                  menuMinWidthPx={320}
+                  menuMaxWidthPx={460}
+                  searchPlaceholder="Search studies by #, title, or slug..."
+                  className="w-full rounded-lg text-sm sm:w-80"
+                />
+              </div>
+              <label className="app-muted space-y-1 text-sm">
+                <span className="block">Min votes per user</span>
+                <input
+                  type="number"
+                  name="minVotes"
+                  min={1}
+                  max={MAX_MIN_VOTES}
+                  defaultValue={minVotesResult.value}
+                  className="app-input h-9 w-44 rounded-lg px-2.5 text-sm outline-none"
+                />
+              </label>
+            </ReportLoadForm>
+            {!minVotesResult.isValid && params.minVotes ? (
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                Invalid minimum votes threshold. Using default of {DEFAULT_MIN_VOTES}.
+              </p>
+            ) : null}
+            {selectedReport ? (
+              <p className="app-muted text-sm">
+                Study window:{" "}
+                <LocalStudyWindow
+                  start={
+                    selectedReport.study.start_datetime_utc ??
+                    selectedReport.study.created_datetime_utc
+                  }
+                  end={selectedReport.study.end_datetime_utc}
+                />
+              </p>
+            ) : null}
+          </header>
 
         <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <article className="app-card app-stat-card-teal rounded-xl p-4">
@@ -690,5 +683,6 @@ export default async function StudyVoteTimingPage({
         </section>
       </section>
     </main>
+  </div>
   );
 }

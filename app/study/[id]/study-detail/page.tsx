@@ -11,8 +11,12 @@ import {
   type VoteDistributionRow,
 } from "./caption-gallery-shared";
 
+import { AppFormSelect } from "@/components/app-select";
+import { LocalStudyWindow } from "@/components/local-study-window";
 import { ReportLoadForm } from "@/components/report-load-form";
+import { TopNavbar } from "@/components/top-navbar";
 import type { Database, Tables } from "@/src/types/supabase";
+import { formatStudySwitcherOption } from "@/utils/attribution-ui-helpers";
 import { formatDurationFromMinutes } from "@/utils/format-duration";
 import { createClient } from "@/utils/supabase/server";
 import {
@@ -118,16 +122,6 @@ const createEmptyVoteDistributionCountMap = () =>
   new Map<StudyVoteValue, number>(STUDY_VOTE_VALUE_ORDER.map((voteValue) => [voteValue, 0]));
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
-
-const utcDateTimeFormatter = new Intl.DateTimeFormat("en-US", {
-  year: "numeric",
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  timeZone: "UTC",
-  timeZoneName: "short",
-});
 
 const parseStudyIdParam = (rawValue: string) => {
   const parsed = Number.parseInt(rawValue, 10);
@@ -470,39 +464,7 @@ const getStudyVoteTimeFilterState = ({
   };
 };
 
-const getStudyLabel = (study: StudySummary) => {
-  if (study.slug) {
-    return `${study.id} - ${study.slug}`;
-  }
-
-  if (study.description) {
-    return `${study.id} - ${study.description}`;
-  }
-
-  return `Study ${study.id}`;
-};
-
-const formatStudyWindow = (study: StudySummary) => {
-  const start = study.start_datetime_utc ?? study.created_datetime_utc;
-  const end = study.end_datetime_utc;
-
-  return `${formatTimestamp(start)} to ${formatTimestamp(end)}`;
-};
-
 const formatPercent = (value: number) => `${(value * 100).toFixed(2)}%`;
-
-const formatTimestamp = (value: string | null) => {
-  if (!value) {
-    return "n/a";
-  }
-
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    return value;
-  }
-
-  return utcDateTimeFormatter.format(new Date(timestamp));
-};
 
 const getCaptionText = (content: string | null) => {
   const trimmed = content?.trim();
@@ -817,68 +779,76 @@ export default async function StudyDetailPage({ params, searchParams }: StudyDet
   });
   const didntGetItShare =
     report.vote_distribution_rows.find((row) => row.vote_value === "didnt get it")?.percentage ?? 0;
+  const studySelectOptions = studies.map((study) =>
+    formatStudySwitcherOption({
+      id: study.id,
+      slug: study.slug,
+      description: study.description,
+    }),
+  );
 
   return (
-    <main className="page-shell min-h-screen p-6 text-foreground">
-      <section className="app-panel mx-auto w-full max-w-7xl space-y-6 rounded-2xl p-6">
-        <header className="space-y-2">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+    <div className="flex min-h-screen flex-col bg-background">
+      <TopNavbar />
+      <main className="page-shell flex-1 p-4 text-foreground sm:p-6">
+        <section className="app-panel mx-auto w-full max-w-7xl space-y-6 rounded-2xl p-5 sm:p-6">
+          <header className="space-y-2.5">
             <div>
-              <p className="app-kicker text-xs font-semibold uppercase tracking-[0.24em]">
-                Humor Study Stats
-              </p>
-              <h1 className="text-2xl font-semibold">Study Detail</h1>
-            </div>
-            <Link
-              href="/"
-              className="app-button inline-flex rounded-lg px-3 py-2 text-sm font-medium transition"
-            >
-              Home
-            </Link>
-          </div>
-          <p className="app-muted text-sm">
-            A study-level vote summary with overall volume, vote mix, and caption-by-caption vote
-            coverage. The vote-time distribution chart recalculates every metric using only vote
-            events whose time to vote falls inside the selected window.
-          </p>
-          <ReportLoadForm
-            disabled={studies.length === 0}
-            className="flex flex-wrap items-end gap-3"
-            pathBuilder={{
-              fieldName: "studyId",
-              prefix: "/study",
-              suffix: "study-detail",
-            }}
-          >
-            <label className="app-muted space-y-1 text-sm">
-              <span className="block">Study</span>
-              <select
-                name="studyId"
-                defaultValue={requestedStudyId.toString()}
-                disabled={studies.length === 0}
-                className="app-input h-9 min-w-80 rounded-md px-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-60"
+              <Link
+                href={`/study/${requestedStudyId}/attribution`}
+                className="app-kicker inline-flex items-center gap-1 py-1 text-xs font-semibold hover:underline"
               >
-                {studies.map((study) => (
-                  <option key={study.id} value={study.id}>
-                    {getStudyLabel(study)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </ReportLoadForm>
-          <p className="app-muted text-sm">Study window: {formatStudyWindow(selectedStudy)}</p>
-          <StudyDetailVoteTimeFilter
-            distributionRows={voteTimeFilter.vote_time_distribution_rows}
-            availableMinVoteSecond={voteTimeFilter.available_min_vote_second}
-            availableMaxVoteSecond={voteTimeFilter.available_max_vote_second}
-            selectedMinVoteSecond={voteTimeFilter.selected_min_vote_second}
-            selectedMaxVoteSecond={voteTimeFilter.selected_max_vote_second}
-            timedVoteCount={voteTimeFilter.timed_vote_count}
-            filteredVoteCount={voteTimeFilter.filtered_vote_rows.length}
-            untimedVoteCount={voteTimeFilter.untimed_vote_count}
-            hasInvalidSelection={voteTimeFilter.has_invalid_selection}
-          />
-        </header>
+                ← Back to Study #{requestedStudyId} Studio
+              </Link>
+              <h1 className="mt-0.5 text-2xl font-semibold">Study Detail</h1>
+            </div>
+            <p className="app-muted text-sm">
+              Vote volume, 6-point rating mix, and caption-by-caption coverage across the selected duration window.
+            </p>
+            <ReportLoadForm
+              disabled={studies.length === 0}
+              className="flex flex-wrap items-end gap-3"
+              pathBuilder={{
+                fieldName: "studyId",
+                prefix: "/study",
+                suffix: "study-detail",
+              }}
+            >
+              <div className="app-muted w-full space-y-1 text-sm sm:w-auto">
+                <span className="block">Study</span>
+                <AppFormSelect
+                  name="studyId"
+                  ariaLabel="Study"
+                  submitOnChange
+                  defaultValue={requestedStudyId.toString()}
+                  options={studySelectOptions}
+                  disabled={studies.length === 0}
+                  menuMinWidthPx={320}
+                  menuMaxWidthPx={460}
+                  searchPlaceholder="Search studies by #, title, or slug..."
+                  className="w-full rounded-lg text-sm sm:w-80"
+                />
+              </div>
+            </ReportLoadForm>
+            <p className="app-muted text-sm">
+              Study window:{" "}
+              <LocalStudyWindow
+                start={selectedStudy.start_datetime_utc ?? selectedStudy.created_datetime_utc}
+                end={selectedStudy.end_datetime_utc}
+              />
+            </p>
+            <StudyDetailVoteTimeFilter
+              distributionRows={voteTimeFilter.vote_time_distribution_rows}
+              availableMinVoteSecond={voteTimeFilter.available_min_vote_second}
+              availableMaxVoteSecond={voteTimeFilter.available_max_vote_second}
+              selectedMinVoteSecond={voteTimeFilter.selected_min_vote_second}
+              selectedMaxVoteSecond={voteTimeFilter.selected_max_vote_second}
+              timedVoteCount={voteTimeFilter.timed_vote_count}
+              filteredVoteCount={voteTimeFilter.filtered_vote_rows.length}
+              untimedVoteCount={voteTimeFilter.untimed_vote_count}
+              hasInvalidSelection={voteTimeFilter.has_invalid_selection}
+            />
+          </header>
 
         <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           <article className="app-card app-stat-card-teal rounded-xl p-4">
@@ -973,5 +943,6 @@ export default async function StudyDetailPage({ params, searchParams }: StudyDet
         <StudyDetailCaptionGallery captionRows={report.caption_rows} />
       </section>
     </main>
+  </div>
   );
 }

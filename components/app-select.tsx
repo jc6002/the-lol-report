@@ -629,3 +629,49 @@ export function AppSelect<V extends string = string>({
     </>
   );
 }
+
+export interface AppFormSelectProps<V extends string = string>
+  extends Omit<AppSelectProps<V>, "value" | "onValueChange"> {
+  readonly name: string;
+  readonly defaultValue: V;
+  readonly submitOnChange?: boolean;
+}
+
+export function AppFormSelect<V extends string = string>({
+  name,
+  defaultValue,
+  submitOnChange = false,
+  ...selectProps
+}: AppFormSelectProps<V>) {
+  const hiddenInputRef = useRef<HTMLInputElement>(null);
+  const [selectedValue, setSelectedValue] = useState<V>(defaultValue);
+  const [prevDefault, setPrevDefault] = useState<V>(defaultValue);
+
+  if (defaultValue !== prevDefault) {
+    setPrevDefault(defaultValue);
+    setSelectedValue(defaultValue);
+  }
+
+  return (
+    <>
+      <input
+        ref={hiddenInputRef}
+        type="hidden"
+        name={name}
+        value={selectedValue}
+      />
+      <AppSelect
+        {...selectProps}
+        value={selectedValue}
+        onValueChange={(nextValue) => {
+          setSelectedValue(nextValue);
+          if (submitOnChange) {
+            requestAnimationFrame(() => {
+              hiddenInputRef.current?.form?.requestSubmit();
+            });
+          }
+        }}
+      />
+    </>
+  );
+}

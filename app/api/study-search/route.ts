@@ -41,6 +41,7 @@ export async function GET(request: NextRequest) {
     const { supabaseUrl } = getSupabasePublicEnv();
     const catalog = await fetchFastStudyHubCatalogWithClient(supabase, {
       cacheKey: supabaseUrl,
+      verifiedSuperadmin: true,
     });
 
     if (isCatalogRequest) {

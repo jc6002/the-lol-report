@@ -674,7 +674,7 @@ export function TopNavbarClient({
             aria-label={siteTitle}
             className="inline-flex shrink-0 items-center gap-2.5 rounded-lg py-0.5 transition hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:gap-3"
           >
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 text-sm font-bold text-white shadow">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#c2410c] text-sm font-bold text-white shadow">
               LR
             </span>
             <span className="hidden text-xs font-semibold uppercase tracking-[0.24em] text-foreground sm:inline sm:text-sm">

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { TopNavbar } from "@/components/top-navbar";
 import { WeeklyStudySummaryCharts } from "@/components/weekly-study-summary-charts";
 import type { Database, Tables } from "@/src/types/supabase";
 import {
@@ -296,7 +297,6 @@ export default async function WeeklyStudySummaryPage({
     1,
     MAX_STUDY_LIMIT,
   );
-  const generatedAtUtc = new Date().toISOString();
 
   const supabase = await createClient();
   const studies = await getStudies(supabase, studyLimitResult.value);
@@ -336,24 +336,22 @@ export default async function WeeklyStudySummaryPage({
   }));
 
   return (
-    <main className="page-shell min-h-screen p-6 text-foreground">
-      <section className="app-panel mx-auto w-full max-w-7xl space-y-6 rounded-2xl p-6">
-        <header className="flex flex-wrap items-start justify-between gap-4">
-          <div className="space-y-2">
-            <p className="app-kicker text-xs font-semibold uppercase tracking-[0.24em]">
-              Humor Study Stats
-            </p>
+    <div className="flex min-h-screen flex-col bg-background">
+      <TopNavbar />
+      <main className="page-shell flex-1 p-4 text-foreground sm:p-6">
+        <section className="app-panel mx-auto w-full max-w-7xl space-y-6 rounded-2xl p-5 sm:p-6">
+          <header className="space-y-2">
+            <Link
+              href="/"
+              className="app-kicker inline-flex items-center gap-1 py-1 text-xs font-semibold hover:underline"
+            >
+              ← Study Hub
+            </Link>
             <h1 className="text-2xl font-semibold">Weekly Humor Study Summary</h1>
             <p className="app-muted text-sm">
-              Studies charted: {chartRows.length} | Generated at: {generatedAtUtc}
+              {chartRows.length} recent studies charted · positive vote share (upvotes / total votes)
             </p>
-            <p className="app-muted text-sm">
-              This faster view uses study-level aggregates instead of per-caption vote scans.
-            </p>
-            <p className="app-muted text-sm">
-              Weighted score formula: total upvotes / total votes.
-            </p>
-            <form method="get" className="flex flex-wrap items-end gap-3">
+            <form method="get" className="flex flex-wrap items-end gap-3 pt-1">
               <label className="app-muted space-y-1 text-sm">
                 <span className="block">Studies to include</span>
                 <input
@@ -362,39 +360,32 @@ export default async function WeeklyStudySummaryPage({
                   min={1}
                   max={MAX_STUDY_LIMIT}
                   defaultValue={studyLimitResult.value}
-                  className="app-input h-9 w-40 rounded-md px-2 text-sm outline-none"
+                  className="app-input h-9 w-40 rounded-lg px-2.5 text-sm outline-none"
                 />
               </label>
               <button
                 type="submit"
                 disabled={studies.length === 0}
-                className="app-button h-9 rounded-md px-3 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60"
+                className="app-button h-9 cursor-pointer rounded-lg px-3.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60"
               >
                 Refresh
               </button>
             </form>
             {!studyLimitResult.isValid && params.limit ? (
               <p className="text-sm text-amber-700 dark:text-amber-300">
-                Invalid `limit` value. Using default of {DEFAULT_STUDY_LIMIT}.
+                Invalid study limit. Showing default of {DEFAULT_STUDY_LIMIT}.
               </p>
             ) : null}
             {studies.length === 0 ? (
               <p className="text-sm text-amber-700 dark:text-amber-300">
-                No studies were found in the `studies` table.
+                No studies are currently available.
               </p>
             ) : null}
-          </div>
+          </header>
 
-          <Link
-            href="/"
-            className="app-button inline-flex rounded-lg px-3 py-2 text-sm font-medium transition"
-          >
-            Back to dashboard
-          </Link>
-        </header>
-
-        <WeeklyStudySummaryCharts data={chartRows} />
-      </section>
-    </main>
+          <WeeklyStudySummaryCharts data={chartRows} />
+        </section>
+      </main>
+    </div>
   );
 }

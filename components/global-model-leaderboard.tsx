@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Fragment, useDeferredValue, useMemo, useState } from "react";
 
 import { AppSelect, type AppSelectOption } from "@/components/app-select";
+import { computeWilsonConfidenceInterval } from "@/utils/attribution-stats";
 import {
   formatChainSecondsLabel,
   formatCompactCount,
@@ -16,7 +17,62 @@ import type {
 } from "@/utils/global-attribution-loader";
 
 type ModelRoleLens = "synthesis" | "pipeline";
+type GlobalEraFilter = "all" | "swipe" | "rating";
 type ModelSortMode = "ci_low" | "exposures" | "studies" | "latency" | "name";
+
+const parseInitialEra = (raw?: string): GlobalEraFilter => {
+  const normalized = raw?.trim().toLowerCase();
+  if (normalized === "swipe") return "swipe";
+  if (
+    normalized === "rating" ||
+    normalized === "rating scale" ||
+    normalized === "likert"
+  ) {
+    return "rating";
+  }
+  return "all";
+};
+
+const parseInitialLens = (raw?: string): ModelRoleLens =>
+  raw?.trim().toLowerCase() === "pipeline" ? "pipeline" : "synthesis";
+
+const syncModelUrlParams = (updates: {
+  q?: string | null;
+  era?: GlobalEraFilter | null;
+  lens?: ModelRoleLens | null;
+  model?: string | null;
+}) => {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  if (updates.q !== undefined) {
+    const trimmed = updates.q?.trim() ?? "";
+    if (trimmed.length > 0) params.set("q", trimmed);
+    else params.delete("q");
+  }
+  if (updates.era !== undefined) {
+    if (updates.era && updates.era !== "all") params.set("era", updates.era);
+    else params.delete("era");
+  }
+  if (updates.lens !== undefined) {
+    if (updates.lens && updates.lens !== "synthesis") {
+      params.set("lens", updates.lens);
+    } else {
+      params.delete("lens");
+    }
+  }
+  if (updates.model !== undefined) {
+    if (updates.model) params.set("model", updates.model);
+    else params.delete("model");
+  }
+  const nextQuery = params.toString();
+  window.history.replaceState(
+    window.history.state,
+    "",
+    nextQuery
+      ? `${window.location.pathname}?${nextQuery}`
+      : window.location.pathname,
+  );
+};
 
 const MODEL_SORT_OPTIONS: ReadonlyArray<AppSelectOption<ModelSortMode>> = [
   { value: "ci_low", label: "Highest positive rate (95% CI)" },
@@ -43,26 +99,98 @@ const compareNullableAsc = (a: number | null, b: number | null): number => {
 const pickLensMetrics = (
   row: GlobalModelLeaderboardRow,
   lens: ModelRoleLens,
+  era: GlobalEraFilter = "all",
 ) => {
-  // In synthesis lens, surface synthesis metrics when the model synthesized >= 1
-  // caption; for upstream-only vision/draft models (0 synthesis captions), show
-  // their pipeline-step participation with an explicit Upstream badge.
-  const useSynthesis = lens === "synthesis" && row.synthesisCaptionCount > 0;
+  if (era === "all") {
+    const useSynthesis = lens === "synthesis" && row.synthesisCaptionCount > 0;
+    const roleStudies = row.studies.filter((study) =>
+      useSynthesis ? study.role === "synthesis" : true,
+    );
+    return {
+      isUpstreamFallback:
+        lens === "synthesis" && row.synthesisCaptionCount === 0,
+      studyCount: useSynthesis
+        ? row.synthesisStudyCount
+        : row.pipelineStudyCount,
+      upstreamOnlyStudyCount: Math.max(
+        0,
+        row.pipelineStudyCount - row.synthesisStudyCount,
+      ),
+      flavorCount: useSynthesis
+        ? row.synthesisFlavorCount
+        : row.pipelineFlavorCount,
+      captionCount: useSynthesis
+        ? row.synthesisCaptionCount
+        : row.pipelineCaptionCount,
+      exposures: useSynthesis ? row.synthesisExposures : row.pipelineExposures,
+      rate: useSynthesis ? row.synthesisRate : row.pipelineRate,
+      ciLow: useSynthesis ? row.synthesisCiLow : row.pipelineCiLow,
+      ciHigh: useSynthesis ? row.synthesisCiHigh : row.pipelineCiHigh,
+      studies: roleStudies,
+    };
+  }
+
+  const isSwipe = era === "swipe";
+  const targetFormat = isSwipe ? "Swipe" : "Rating scale";
+  const matchingStudies = row.studies.filter(
+    (study) => study.formatDisplayLabel === targetFormat,
+  );
+  const synExposures = isSwipe
+    ? row.synthesisSwipeExposures
+    : row.synthesisRatingScaleExposures;
+  const synPositive = isSwipe
+    ? row.synthesisSwipePositive
+    : row.synthesisRatingScalePositive;
+  const pipeExposures = isSwipe
+    ? row.pipelineSwipeExposures
+    : row.pipelineRatingScaleExposures;
+  const pipePositive = isSwipe
+    ? row.pipelineSwipePositive
+    : row.pipelineRatingScalePositive;
+  const synStudyCount = isSwipe
+    ? row.synthesisSwipeStudyCount
+    : row.synthesisRatingScaleStudyCount;
+  const pipeStudyCount = isSwipe
+    ? row.pipelineSwipeStudyCount
+    : row.pipelineRatingScaleStudyCount;
+  const synFlavorCount =
+    (isSwipe
+      ? row.synthesisSwipeFlavorCount
+      : row.synthesisRatingScaleFlavorCount) ?? row.synthesisFlavorCount;
+  const pipeFlavorCount =
+    (isSwipe
+      ? row.pipelineSwipeFlavorCount
+      : row.pipelineRatingScaleFlavorCount) ?? row.pipelineFlavorCount;
+
+  const useSynthesis =
+    lens === "synthesis" &&
+    (synExposures > 0 || (pipeExposures === 0 && synStudyCount > 0));
+  const exposures = useSynthesis ? synExposures : pipeExposures;
+  const positive = useSynthesis ? synPositive : pipePositive;
+  const ci = computeWilsonConfidenceInterval(positive, exposures);
+  const roleStudies = matchingStudies.filter((study) =>
+    useSynthesis ? study.role === "synthesis" : true,
+  );
+  const captionCount = roleStudies.reduce(
+    (sum, study) =>
+      sum +
+      (useSynthesis
+        ? study.captionCount
+        : (study.pipelineCaptionCount ?? study.captionCount)),
+    0,
+  );
+
   return {
-    isUpstreamFallback: lens === "synthesis" && row.synthesisCaptionCount === 0,
-    studyCount: useSynthesis
-      ? row.synthesisStudyCount
-      : row.pipelineStudyCount,
-    flavorCount: useSynthesis
-      ? row.synthesisFlavorCount
-      : row.pipelineFlavorCount,
-    captionCount: useSynthesis
-      ? row.synthesisCaptionCount
-      : row.pipelineCaptionCount,
-    exposures: useSynthesis ? row.synthesisExposures : row.pipelineExposures,
-    rate: useSynthesis ? row.synthesisRate : row.pipelineRate,
-    ciLow: useSynthesis ? row.synthesisCiLow : row.pipelineCiLow,
-    ciHigh: useSynthesis ? row.synthesisCiHigh : row.pipelineCiHigh,
+    isUpstreamFallback: lens === "synthesis" && !useSynthesis,
+    studyCount: useSynthesis ? synStudyCount : pipeStudyCount,
+    upstreamOnlyStudyCount: Math.max(0, pipeStudyCount - synStudyCount),
+    flavorCount: useSynthesis ? synFlavorCount : pipeFlavorCount,
+    captionCount,
+    exposures,
+    rate: ci.rate,
+    ciLow: ci.low,
+    ciHigh: ci.high,
+    studies: roleStudies,
   };
 };
 
@@ -71,12 +199,16 @@ export function GlobalModelLeaderboard({
   unevaluatedModels,
   initialModelParam,
   initialQuery = "",
+  initialEraParam,
+  initialLensParam,
   onClearEntityFocus,
 }: {
   models: GlobalModelLeaderboardRow[];
   unevaluatedModels: UnevaluatedModelCatalogItem[];
   initialModelParam?: string;
   initialQuery?: string;
+  initialEraParam?: string;
+  initialLensParam?: string;
   onClearEntityFocus?: () => void;
 }) {
   const matchedInitialModel = useMemo(() => {
@@ -99,7 +231,12 @@ export function GlobalModelLeaderboard({
     () => matchedInitialModel?.modelId ?? null,
   );
   const [missingNoticeDismissed, setMissingNoticeDismissed] = useState(false);
-  const [roleLens, setRoleLens] = useState<ModelRoleLens>("synthesis");
+  const [roleLens, setRoleLens] = useState<ModelRoleLens>(() =>
+    parseInitialLens(initialLensParam),
+  );
+  const [eraFilter, setEraFilter] = useState<GlobalEraFilter>(() =>
+    parseInitialEra(initialEraParam),
+  );
   const [searchQuery, setSearchQuery] = useState(initialQuery);
   const [sortMode, setSortMode] = useState<ModelSortMode>("ci_low");
   const [expandedIds, setExpandedIds] = useState<Set<number>>(() =>
@@ -124,6 +261,7 @@ export function GlobalModelLeaderboard({
   const clearPinnedModel = () => {
     setPinnedModelId(null);
     setMissingNoticeDismissed(true);
+    syncModelUrlParams({ model: null });
     onClearEntityFocus?.();
   };
 
@@ -132,6 +270,15 @@ export function GlobalModelLeaderboard({
     const filtered = models.filter((row) => {
       if (pinnedModelId !== null) {
         return row.modelId === pinnedModelId;
+      }
+      if (eraFilter !== "all") {
+        const eraExposures =
+          eraFilter === "swipe"
+            ? row.pipelineSwipeExposures
+            : row.pipelineRatingScaleExposures;
+        if (eraExposures <= 0) {
+          return false;
+        }
       }
       if (trimmed.length === 0) {
         return true;
@@ -149,11 +296,9 @@ export function GlobalModelLeaderboard({
     });
 
     return [...filtered].sort((left, right) => {
-      const l = pickLensMetrics(left, roleLens);
-      const r = pickLensMetrics(right, roleLens);
+      const l = pickLensMetrics(left, roleLens, eraFilter);
+      const r = pickLensMetrics(right, roleLens, eraFilter);
 
-      // In default synthesis rate ranking, group synthesis models ahead of
-      // upstream-only draft/vision helpers.
       if (
         roleLens === "synthesis" &&
         sortMode === "ci_low" &&
@@ -184,7 +329,7 @@ export function GlobalModelLeaderboard({
       if (l.exposures !== r.exposures) return r.exposures - l.exposures;
       return left.name.localeCompare(right.name);
     });
-  }, [models, deferredQuery, pinnedModelId, roleLens, sortMode]);
+  }, [models, deferredQuery, pinnedModelId, roleLens, eraFilter, sortMode]);
 
   const pinnedModel =
     pinnedModelId !== null
@@ -196,72 +341,79 @@ export function GlobalModelLeaderboard({
     matchedInitialModel === null &&
     !missingNoticeDismissed;
 
-  const renderStudiesBreakdown = (row: GlobalModelLeaderboardRow) => (
-    <div className="space-y-2 rounded-xl border border-slate-200/75 bg-white/65 p-3.5 text-xs dark:border-slate-700/75 dark:bg-slate-950/45">
-      <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
-        <span className="app-muted">
-          Provider ID:{" "}
-          <span className="font-mono text-foreground">{row.providerModelId}</span>
-        </span>
-        <span className="app-muted tabular-nums">
-          Synthesis: {row.synthesisStudyCount}{" "}
-          {row.synthesisStudyCount === 1 ? "study" : "studies"} (
-          {row.synthesisCaptionCount.toLocaleString()} caps) · All chain steps:{" "}
-          {row.pipelineStudyCount}{" "}
-          {row.pipelineStudyCount === 1 ? "study" : "studies"} (
-          {row.pipelineCaptionCount.toLocaleString()} caps)
-        </span>
-      </div>
+  const renderStudiesBreakdown = (row: GlobalModelLeaderboardRow) => {
+    const m = pickLensMetrics(row, roleLens, eraFilter);
+    const studiesToShow = m.studies.length > 0 ? m.studies : row.studies;
 
-      <div className="space-y-1.5">
-        {row.studies.map((study) => (
-          <div
-            key={`${row.modelId}-study-${study.studyId}`}
-            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200/70 bg-white/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/70"
-          >
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="app-muted font-mono tabular-nums">
-                  #{study.studyId}
-                </span>
-                <span className="font-semibold text-foreground">
-                  {study.studyTitle}
-                </span>
-                <span
-                  className={
-                    study.role === "synthesis"
-                      ? "inline-flex rounded bg-teal-500/15 px-1.5 py-0.5 text-[11px] font-medium text-teal-900 ring-1 ring-teal-500/30 dark:text-cyan-100"
-                      : "inline-flex rounded bg-slate-500/15 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-slate-500/25 dark:text-slate-200"
-                  }
-                >
-                  {study.role === "synthesis"
-                    ? "Synthesis step"
-                    : "Pipeline step"}
-                </span>
-                <span className="app-muted text-[11px]">
-                  {study.formatDisplayLabel}
-                </span>
-              </div>
-              <p className="app-muted mt-0.5 tabular-nums">
-                {study.captionCount.toLocaleString()}{" "}
-                {study.captionCount === 1 ? "caption" : "captions"} ·{" "}
-                {study.exposures > 0
-                  ? `${study.exposures.toLocaleString()} exposures · ${formatHubPercent(study.rate)}`
-                  : "0 votes yet"}
-              </p>
-            </div>
+    return (
+      <div className="space-y-2 rounded-xl border border-slate-200/75 bg-white/65 p-3.5 text-xs dark:border-slate-700/75 dark:bg-slate-950/45">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
+          <span className="app-muted">
+            Provider ID:{" "}
+            <span className="font-mono text-foreground">
+              {row.providerModelId}
+            </span>
+          </span>
+          <span className="app-muted tabular-nums">
+            Synthesis: {row.synthesisStudyCount}{" "}
+            {row.synthesisStudyCount === 1 ? "study" : "studies"} (
+            {row.synthesisCaptionCount.toLocaleString()} caps) · All chain
+            steps: {row.pipelineStudyCount}{" "}
+            {row.pipelineStudyCount === 1 ? "study" : "studies"} (
+            {row.pipelineCaptionCount.toLocaleString()} caps)
+          </span>
+        </div>
 
-            <Link
-              href={study.href}
-              className="app-button inline-flex h-7 items-center rounded-md px-2.5 text-[11px] font-medium transition"
+        <div className="space-y-1.5">
+          {studiesToShow.map((study) => (
+            <div
+              key={`${row.modelId}-study-${study.studyId}`}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200/70 bg-white/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/70"
             >
-              Open Study #{study.studyId} →
-            </Link>
-          </div>
-        ))}
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="app-muted font-mono tabular-nums">
+                    #{study.studyId}
+                  </span>
+                  <span className="font-semibold text-foreground">
+                    {study.studyTitle}
+                  </span>
+                  <span
+                    className={
+                      study.role === "synthesis"
+                        ? "inline-flex rounded bg-teal-500/15 px-1.5 py-0.5 text-[11px] font-medium text-teal-900 dark:text-cyan-100"
+                        : "inline-flex rounded bg-slate-500/15 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200"
+                    }
+                  >
+                    {study.role === "synthesis"
+                      ? "Synthesis step"
+                      : "Pipeline step"}
+                  </span>
+                  <span className="app-muted text-[11px]">
+                    {study.formatDisplayLabel}
+                  </span>
+                </div>
+                <p className="app-muted mt-0.5 tabular-nums">
+                  {study.captionCount.toLocaleString()}{" "}
+                  {study.captionCount === 1 ? "caption" : "captions"} ·{" "}
+                  {study.exposures > 0
+                    ? `${study.exposures.toLocaleString()} exposures · ${formatHubPercent(study.rate)}`
+                    : "0 votes yet"}
+                </p>
+              </div>
+
+              <Link
+                href={study.href}
+                className="app-button inline-flex h-7 items-center rounded-md px-2.5 text-[11px] font-medium transition"
+              >
+                Open Study #{study.studyId} →
+              </Link>
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="space-y-3" aria-busy={deferredQuery !== searchQuery}>
@@ -305,7 +457,7 @@ export function GlobalModelLeaderboard({
 
       <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex flex-wrap items-center gap-2">
-          <div className="relative w-full sm:w-72">
+          <div className="relative w-full sm:w-64">
             <Search
               aria-hidden="true"
               className="app-muted pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2"
@@ -314,15 +466,53 @@ export function GlobalModelLeaderboard({
               type="search"
               value={searchQuery}
               onChange={(event) => {
+                const nextValue = event.target.value;
                 if (pinnedModelId !== null) {
                   setPinnedModelId(null);
+                  syncModelUrlParams({ q: nextValue, model: null });
+                } else {
+                  syncModelUrlParams({ q: nextValue });
                 }
-                setSearchQuery(event.target.value);
+                setSearchQuery(nextValue);
               }}
               placeholder="Filter models or providers..."
               aria-label="Filter evaluated LLM models"
               className="app-input h-9 w-full rounded-lg pl-9 pr-3 text-sm outline-none"
             />
+          </div>
+
+          <div
+            role="group"
+            aria-label="Filter by study format era"
+            className="app-input inline-flex max-w-full items-center gap-1 overflow-x-auto overflow-y-hidden rounded-lg p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          >
+            {(
+              [
+                { id: "all", label: "All" },
+                { id: "swipe", label: "Swipe" },
+                { id: "rating", label: "Rating scale" },
+              ] as const
+            ).map((opt) => {
+              const active = eraFilter === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => {
+                    setEraFilter(opt.id);
+                    syncModelUrlParams({ era: opt.id });
+                  }}
+                  className={`h-7 shrink-0 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition ${
+                    active
+                      ? "bg-white text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
+                      : "app-muted hover:text-foreground"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
           </div>
 
           <div
@@ -342,7 +532,10 @@ export function GlobalModelLeaderboard({
                   key={opt.id}
                   type="button"
                   aria-pressed={active}
-                  onClick={() => setRoleLens(opt.id)}
+                  onClick={() => {
+                    setRoleLens(opt.id);
+                    syncModelUrlParams({ lens: opt.id });
+                  }}
                   className={`h-7 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition ${
                     active
                       ? "bg-white text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
@@ -366,23 +559,31 @@ export function GlobalModelLeaderboard({
             className="w-56 rounded-lg text-xs sm:w-60 sm:text-sm"
           />
           <span className="app-muted text-xs tabular-nums">
-            {visibleRows.length} of {models.length} evaluated
+            {eraFilter === "swipe"
+              ? `${visibleRows.length} of ${models.length} evaluated in Swipe`
+              : eraFilter === "rating"
+                ? `${visibleRows.length} of ${models.length} evaluated in Rating scale`
+                : `${visibleRows.length} of ${models.length} evaluated`}
           </span>
         </div>
       </div>
 
       {visibleRows.length === 0 ? (
         <div className="app-card flex flex-col items-center justify-center gap-3 rounded-xl p-6 text-center text-sm">
-          <p className="app-muted">No evaluated models match this filter.</p>
+          <p className="app-muted">No evaluated models match these filters.</p>
           <button
             type="button"
             onClick={() => {
               setSearchQuery("");
-              clearPinnedModel();
+              setEraFilter("all");
+              setPinnedModelId(null);
+              setMissingNoticeDismissed(true);
+              syncModelUrlParams({ q: null, era: "all", model: null });
+              onClearEntityFocus?.();
             }}
             className="app-button inline-flex h-9 items-center rounded-lg px-3 text-xs font-medium transition"
           >
-            Reset filter
+            Reset filters
           </button>
         </div>
       ) : (
@@ -391,7 +592,7 @@ export function GlobalModelLeaderboard({
           <div className="space-y-2.5 md:hidden">
             {visibleRows.map((row, index) => {
               const isExpanded = expandedIds.has(row.modelId);
-              const m = pickLensMetrics(row, roleLens);
+              const m = pickLensMetrics(row, roleLens, eraFilter);
               return (
                 <article
                   key={row.modelId}
@@ -499,7 +700,7 @@ export function GlobalModelLeaderboard({
               <tbody className="divide-y divide-slate-200/50 dark:divide-slate-800/70">
                 {visibleRows.map((row, index) => {
                   const isExpanded = expandedIds.has(row.modelId);
-                  const m = pickLensMetrics(row, roleLens);
+                  const m = pickLensMetrics(row, roleLens, eraFilter);
                   const lowPct =
                     m.ciLow !== null
                       ? Math.max(0, Math.min(100, m.ciLow * 100))
@@ -544,8 +745,8 @@ export function GlobalModelLeaderboard({
                               <span className="app-kicker mt-1 inline-block text-[11px] font-medium">
                                 {isExpanded
                                   ? "Hide studies"
-                                  : `View ${row.studies.length} ${
-                                      row.studies.length === 1
+                                  : `View ${m.studies.length} ${
+                                      m.studies.length === 1
                                         ? "study"
                                         : "studies"
                                     }`}
@@ -560,14 +761,15 @@ export function GlobalModelLeaderboard({
                           </span>
                           <span className="mt-1 block">
                             {m.isUpstreamFallback ? (
-                              <span className="inline-flex rounded bg-slate-500/15 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-slate-500/25 dark:text-slate-200">
+                              <span className="inline-flex rounded bg-slate-500/15 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200">
                                 Upstream chain step
                               </span>
                             ) : (
-                              <span className="inline-flex rounded bg-teal-500/14 px-1.5 py-0.5 text-[11px] font-medium text-teal-900 ring-1 ring-teal-500/30 dark:text-cyan-100">
+                              <span className="inline-flex rounded bg-teal-500/14 px-1.5 py-0.5 text-[11px] font-medium text-teal-900 dark:text-cyan-100">
                                 Synthesis
-                                {row.pipelineStudyCount > row.synthesisStudyCount
-                                  ? ` + ${row.pipelineStudyCount - row.synthesisStudyCount} upstream`
+                                {roleLens === "synthesis" &&
+                                m.upstreamOnlyStudyCount > 0
+                                  ? ` + ${m.upstreamOnlyStudyCount} upstream`
                                   : ""}
                               </span>
                             )}
@@ -652,12 +854,12 @@ export function GlobalModelLeaderboard({
       )}
 
       {unevaluatedModels.length > 0 ? (
-        <div className="rounded-xl border border-slate-200/70 bg-white/45 px-3.5 py-2.5 dark:border-slate-800 dark:bg-slate-900/35">
+        <div className="rounded-xl border border-slate-200/70 bg-white/45 px-3.5 py-1 dark:border-slate-800 dark:bg-slate-900/35">
           <button
             type="button"
             aria-expanded={showUnevaluated}
             onClick={() => setShowUnevaluated((prev) => !prev)}
-            className="app-muted flex w-full items-center justify-between gap-2 text-left text-xs font-medium hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            className="app-muted flex min-h-9 w-full items-center justify-between gap-2 text-left text-xs font-medium hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
           >
             <span>
               {unevaluatedModels.length} catalog{" "}
@@ -673,7 +875,7 @@ export function GlobalModelLeaderboard({
           </button>
 
           {showUnevaluated ? (
-            <div className="mt-2.5 flex flex-wrap gap-1.5">
+            <div className="mb-1.5 mt-1.5 flex flex-wrap gap-1.5">
               {unevaluatedModels.map((item) => (
                 <span
                   key={item.modelId}

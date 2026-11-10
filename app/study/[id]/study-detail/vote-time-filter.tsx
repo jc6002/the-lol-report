@@ -297,11 +297,6 @@ function StudyDetailVoteTimeFilterControls({
               Vote Duration Filter
             </p>
             <h2 className="text-lg font-semibold">Vote-time histogram</h2>
-            <p className="app-muted max-w-3xl text-sm">
-              Bars show frequency in 5-second buckets. Drag either handle below the chart to
-              shorten or extend the included window. The visible histogram still zooms to 50%
-              below the selected minimum and 50% above the selected maximum.
-            </p>
           </div>
           {!isAtFullRange ? (
             <button
@@ -399,7 +394,7 @@ function StudyDetailVoteTimeFilterControls({
           <div className="relative h-10">
             <div className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-slate-200/80 dark:bg-slate-950/60" />
             <div
-              className="absolute top-1/2 h-2 -translate-y-1/2 rounded-full bg-[linear-gradient(90deg,#f97316_0%,#ec4899_48%,#0ea5e9_100%)]"
+              className="absolute top-1/2 h-2 -translate-y-1/2 rounded-full bg-[linear-gradient(90deg,#4338ca_0%,#d97706_100%)] dark:bg-[linear-gradient(90deg,#6366f1_0%,#f59e0b_100%)]"
               style={{
                 left: `${minThumbPercent}%`,
                 width: `${Math.max(maxThumbPercent - minThumbPercent, 0)}%`,
@@ -443,21 +438,20 @@ function StudyDetailVoteTimeFilterControls({
           </div>
         </div>
 
-        <div className="mt-4 space-y-1 text-sm">
-          <p className="app-muted">
-            The histogram aggregates vote times into 5-second buckets while the underlying filter
-            still applies to vote times inclusively across the selected range.
-            {untimedVoteCount > 0
-              ? ` Untimed vote events excluded from the chart and filtered calculations: ${untimedVoteCount.toLocaleString()}.`
-              : null}
-          </p>
-          {hasInvalidSelection ? (
-            <p className="app-muted">
-              Invalid vote-time filter value detected in the URL. Using the closest available
-              range instead.
-            </p>
-          ) : null}
-        </div>
+        {untimedVoteCount > 0 || hasInvalidSelection ? (
+          <div className="mt-3 space-y-1 text-xs">
+            {untimedVoteCount > 0 ? (
+              <p className="app-muted">
+                Untimed votes excluded: {untimedVoteCount.toLocaleString()}
+              </p>
+            ) : null}
+            {hasInvalidSelection ? (
+              <p className="app-muted">
+                Adjusted filter to closest available vote-time range.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </section>
       {isPending ? <LoadingOverlay label="Refreshing study detail..." /> : null}
     </>

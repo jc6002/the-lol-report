@@ -1,7 +1,8 @@
 "use client";
 
-import { useDeferredValue, useMemo, useState, useTransition } from "react";
+import { useDeferredValue, useId, useMemo, useState, useTransition } from "react";
 
+import { AppSelect } from "@/components/app-select";
 import { formatDurationFromMinutes } from "@/utils/format-duration";
 import {
   DEFAULT_STUDY_NEW_STYLE_SORT_DIRECTION,
@@ -431,7 +432,6 @@ function StudyNewStyleCaptionTableView({
                   </div>
                   <div className="min-w-0">
                     <p className="line-clamp-2 font-medium">{row.caption_preview}</p>
-                    <p className="app-muted truncate font-mono text-xs">{row.caption_id}</p>
                   </div>
                 </div>
               </td>
@@ -473,7 +473,6 @@ function CaptionCardGrid({ rows }: CaptionCardGridProps) {
           )}
           <div className="p-4">
             <p className="text-base font-semibold leading-6">{row.caption_text}</p>
-            <p className="app-muted mt-2 break-all font-mono text-xs">{row.caption_id}</p>
             <dl className="mt-4 text-sm">
               <div>
                 <dt className="app-kicker text-xs font-semibold uppercase tracking-wide">
@@ -504,26 +503,26 @@ function CaptionCardControls({
   onSortChange,
   onSortDirectionToggle,
 }: CaptionCardControlsProps) {
+  const sortSelectId = useId();
   return (
     <div className="flex flex-wrap items-end gap-2">
-      <label className="app-muted space-y-1 text-sm">
-        <span className="block">Sort</span>
-        <select
+      <div className="app-muted space-y-1 text-sm">
+        <label htmlFor={sortSelectId} className="block">
+          Sort
+        </label>
+        <AppSelect
+          id={sortSelectId}
+          ariaLabel="Sort captions"
           value={sortBy}
-          onChange={(event) => {
-            if (isCaptionSortKey(event.target.value)) {
-              onSortChange(event.target.value);
+          options={CAPTION_SORT_OPTIONS}
+          onValueChange={(nextValue) => {
+            if (isCaptionSortKey(nextValue)) {
+              onSortChange(nextValue);
             }
           }}
-          className="app-input h-9 min-w-48 rounded-md px-2 text-sm outline-none"
-        >
-          {CAPTION_SORT_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
+          className="min-w-48 rounded-lg text-sm"
+        />
+      </div>
       <button
         type="button"
         onClick={onSortDirectionToggle}

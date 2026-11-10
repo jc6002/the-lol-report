@@ -11,6 +11,7 @@ export const SWIPE_FAST_MEDIAN_MS = 600;
 export const SWIPE_FAST_SKIP_ALL_MEDIAN_MS = 1200;
 export const LIKERT_FAST_MEDIAN_MS = 600;
 export const LIKERT_FAST_INTER_VOTE_GAP_MS = 1000;
+export const LIKERT_DELIBERATE_MEDIAN_MS = 1500;
 
 const MS_PER_MINUTE = 60_000;
 
@@ -273,9 +274,23 @@ function adaptSwipeExposures({
   excludeHighRisk: boolean;
 }): AdaptedStudyExposures {
   const sortedNavs = [...validNavs].sort(compareEventsChronologically);
+  const sortedVotes = [...validVotes].sort(compareEventsChronologically);
   const likeKeys = new Set<string>();
-  for (const vote of validVotes) {
+  const likePairKeys = new Set<string>();
+  const positiveVoteByPairKey = new Map<
+    string,
+    RawStudyVoteRow & { study_caption_mapping_id: number }
+  >();
+  for (const vote of sortedVotes) {
+    if (!isPositiveStudyVote(vote.vote_value)) {
+      continue;
+    }
     likeKeys.add(getSwipeEventMatchKey(vote));
+    const pairKey = `${vote.profile_id}|${vote.study_caption_mapping_id}`;
+    likePairKeys.add(pairKey);
+    if (!positiveVoteByPairKey.has(pairKey)) {
+      positiveVoteByPairKey.set(pairKey, vote);
+    }
   }
 
   type MutableExposure = UnifiedExposure & { dwellSamples: number[] };
@@ -284,7 +299,8 @@ function adaptSwipeExposures({
 
   for (const nav of sortedNavs) {
     const pairKey = `${nav.profile_id}|${nav.study_caption_mapping_id}`;
-    const matchedLike = likeKeys.has(getSwipeEventMatchKey(nav));
+    const matchedLike =
+      likeKeys.has(getSwipeEventMatchKey(nav)) || likePairKeys.has(pairKey);
     const validDwell =
       nav.time_to_next_caption_ms !== null && nav.time_to_next_caption_ms >= 0
         ? nav.time_to_next_caption_ms
@@ -319,6 +335,27 @@ function adaptSwipeExposures({
         existing.dwellSamples.push(validDwell);
       }
     }
+  }
+
+  // Synthesize seen+liked exposures for positive votes whose mapping lacks a navigation row.
+  for (const [pairKey, vote] of positiveVoteByPairKey.entries()) {
+    if (exposureByPairKey.has(pairKey)) {
+      continue;
+    }
+    const validVoteDwell =
+      vote.time_to_vote_ms !== null && vote.time_to_vote_ms >= 0
+        ? vote.time_to_vote_ms
+        : null;
+    exposureByPairKey.set(pairKey, {
+      profileId: vote.profile_id,
+      mappingId: vote.study_caption_mapping_id,
+      captionId: vote.caption_id,
+      isPositive: true,
+      dwellMs: validVoteDwell,
+      firstSeenUtc: vote.created_datetime_utc,
+      firstEventId: vote.id,
+      dwellSamples: validVoteDwell !== null ? [validVoteDwell] : [],
+    });
   }
 
   const allExposures: UnifiedExposure[] = [];
@@ -456,7 +493,22 @@ function adaptLikertExposures({
   rawNavCount: number;
   excludeHighRisk: boolean;
 }): AdaptedStudyExposures {
-  const sortedVotes = [...validVotes].sort(compareEventsChronologically);
+  const chronologicallySorted = [...validVotes].sort(
+    compareEventsChronologically,
+  );
+  const latestByPairKey = new Map<
+    string,
+    RawStudyVoteRow & { study_caption_mapping_id: number }
+  >();
+  for (const vote of chronologicallySorted) {
+    latestByPairKey.set(
+      `${vote.profile_id}|${vote.study_caption_mapping_id}`,
+      vote,
+    );
+  }
+  const sortedVotes = [...latestByPairKey.values()].sort(
+    compareEventsChronologically,
+  );
   const allExposures: UnifiedExposure[] = [];
   const votesByUser = new Map<
     string,
@@ -507,11 +559,13 @@ function adaptLikertExposures({
     const exposureCount = userVotes.length;
     const timedValues: number[] = [];
     const timestamps: number[] = [];
+    const distinctRawVoteValues = new Set<string>();
     let positiveCount = 0;
     let switches = 0;
     let prevSign: 1 | -1 | null = null;
 
     for (const vote of userVotes) {
+      distinctRawVoteValues.add(vote.vote_value);
       const sign = getStudyVoteSign(vote.vote_value);
       if (sign === 1) {
         positiveCount += 1;
@@ -552,7 +606,14 @@ function adaptLikertExposures({
       ) {
         reasons.push("fast_inter_vote_gap");
       }
-      if (switchRate === 0) {
+      const isDeliberateMultiLabel =
+        distinctRawVoteValues.size >= 2 &&
+        ((medianVoteMs !== null &&
+          medianVoteMs >= LIKERT_DELIBERATE_MEDIAN_MS) ||
+          (medianVoteMs === null &&
+            medianInterVoteGapMs !== null &&
+            medianInterVoteGapMs >= LIKERT_DELIBERATE_MEDIAN_MS));
+      if (switchRate === 0 && !isDeliberateMultiLabel) {
         reasons.push("monotone_polarity");
       }
     }

@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy, Download, FileText } from "lucide-react";
+import { Check, ChevronDown, Copy, Download, FileDown, FileText } from "lucide-react";
 
 import type { StudyExportPayload } from "@/utils/attribution-export";
+import { renderStudyAttributionPdf } from "@/utils/pdf-report-builder";
 
 export type StudyExportToolbarProps = {
   payload: StudyExportPayload;
@@ -12,10 +13,10 @@ export type StudyExportToolbarProps = {
 type CopyStatus = "idle" | "copied" | "blocked";
 
 const triggerBlobDownload = (
-  content: string,
+  content: BlobPart,
   filename: string,
   mimeType: string,
-) => {
+): void => {
   if (typeof document === "undefined" || typeof URL === "undefined") {
     return;
   }
@@ -34,15 +35,20 @@ const triggerBlobDownload = (
 };
 
 export function StudyExportToolbar({ payload }: StudyExportToolbarProps) {
+  const [pdfSaved, setPdfSaved] = useState(false);
   const [copyStatus, setCopyStatus] = useState<CopyStatus>("idle");
   const [csvDownloaded, setCsvDownloaded] = useState(false);
   const [briefDownloaded, setBriefDownloaded] = useState(false);
+  const pdfTimerRef = useRef<number | null>(null);
   const copyTimerRef = useRef<number | null>(null);
   const csvTimerRef = useRef<number | null>(null);
   const briefTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
+      if (pdfTimerRef.current !== null) {
+        window.clearTimeout(pdfTimerRef.current);
+      }
       if (copyTimerRef.current !== null) {
         window.clearTimeout(copyTimerRef.current);
       }
@@ -55,7 +61,19 @@ export function StudyExportToolbar({ payload }: StudyExportToolbarProps) {
     };
   }, []);
 
-  const handleDownloadCsv = () => {
+  const handleDownloadPdf = (): void => {
+    const pdfBytes = renderStudyAttributionPdf(payload.pdfReport);
+    triggerBlobDownload(pdfBytes, payload.pdfFilename, "application/pdf");
+    setPdfSaved(true);
+    if (pdfTimerRef.current !== null) {
+      window.clearTimeout(pdfTimerRef.current);
+    }
+    pdfTimerRef.current = window.setTimeout(() => {
+      setPdfSaved(false);
+    }, 2000);
+  };
+
+  const handleDownloadCsv = (): void => {
     triggerBlobDownload(
       `\uFEFF${payload.csvContent}`,
       payload.csvFilename,
@@ -70,7 +88,7 @@ export function StudyExportToolbar({ payload }: StudyExportToolbarProps) {
     }, 2000);
   };
 
-  const handleCopyBrief = async () => {
+  const handleCopyBrief = async (): Promise<void> => {
     try {
       if (!navigator?.clipboard?.writeText) {
         throw new Error("Clipboard unavailable");
@@ -94,7 +112,7 @@ export function StudyExportToolbar({ payload }: StudyExportToolbarProps) {
     }
   };
 
-  const handleDownloadBrief = () => {
+  const handleDownloadBrief = (): void => {
     triggerBlobDownload(
       payload.briefMarkdown,
       payload.briefFilename,
@@ -116,12 +134,8 @@ export function StudyExportToolbar({ payload }: StudyExportToolbarProps) {
         ? "Clipboard blocked — use Brief .md"
         : "Copy Brief";
 
-  return (
-    <div
-      role="group"
-      aria-label="Export study results"
-      className="flex flex-wrap items-center gap-2"
-    >
+  const renderSecondaryButtons = () => (
+    <>
       <button
         type="button"
         onClick={handleDownloadCsv}
@@ -132,7 +146,9 @@ export function StudyExportToolbar({ payload }: StudyExportToolbarProps) {
       </button>
       <button
         type="button"
-        onClick={handleCopyBrief}
+        onClick={() => {
+          void handleCopyBrief();
+        }}
         aria-live="polite"
         className="app-button inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 motion-reduce:transform-none motion-reduce:transition-none"
       >
@@ -151,6 +167,45 @@ export function StudyExportToolbar({ payload }: StudyExportToolbarProps) {
         <FileText className="size-3.5 shrink-0" aria-hidden="true" />
         <span>{briefDownloaded ? "Saved .md" : "Brief .md"}</span>
       </button>
+    </>
+  );
+
+  return (
+    <div
+      role="group"
+      aria-label="Export study results"
+      className="flex max-w-full flex-wrap items-center gap-2"
+    >
+      <button
+        type="button"
+        onClick={handleDownloadPdf}
+        aria-live="polite"
+        className="app-button app-button-primary inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 motion-reduce:transform-none motion-reduce:transition-none sm:px-3.5"
+      >
+        {pdfSaved ? (
+          <Check className="size-3.5 shrink-0" aria-hidden="true" />
+        ) : (
+          <FileDown className="size-3.5 shrink-0" aria-hidden="true" />
+        )}
+        <span>{pdfSaved ? "Saved PDF" : "Download PDF"}</span>
+      </button>
+
+      <div className="hidden sm:contents">{renderSecondaryButtons()}</div>
+
+      <details className="group sm:hidden open:w-full open:basis-full">
+        <summary className="app-button inline-flex h-9 list-none cursor-pointer items-center gap-1 rounded-lg px-2.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 [&::-webkit-details-marker]:hidden">
+          <span>More exports</span>
+          <ChevronDown
+            aria-hidden="true"
+            className="app-muted size-3.5 shrink-0 transition-transform duration-150 group-open:rotate-180"
+          />
+        </summary>
+        <div className="mt-2 rounded-xl border border-slate-200/90 bg-[#fffaf5] p-2.5 shadow-sm dark:border-cyan-200/18 dark:bg-[#0b1424]">
+          <div className="flex flex-wrap items-center gap-2">
+            {renderSecondaryButtons()}
+          </div>
+        </div>
+      </details>
     </div>
   );
 }

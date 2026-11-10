@@ -462,12 +462,13 @@ describe("utils/attribution-stats", () => {
       [
         "Undergrad",
         "Grad",
-        "Masked small segments (n < 5)",
+        "Small cohorts (n < 5)",
         "No survey response on file",
       ],
     );
 
     const undergradRow = q.rows[0];
+    const gradRow = q.rows[1];
     const undergradAlpha = undergradRow.cellsByFlavorKey["flavor:1"];
     assert.equal(undergradAlpha.status, "visible");
     if (undergradAlpha.status === "visible") {
@@ -480,16 +481,29 @@ describe("utils/attribution-stats", () => {
     assert.deepEqual(undergradBeta, { status: "suppressed" });
     assert.deepEqual(Object.keys(undergradBeta), ["status"]);
 
+    // Complementary column suppression: on flavor:2 (total 8 voters = 3 Undergrad + 5 Grad),
+    // leaving Grad (n=5) visible would let ColumnTotal(8) - Grad(5) = 3 reveal Undergrad's 3 voters!
+    const gradBeta = gradRow.cellsByFlavorKey["flavor:2"];
+    assert.deepEqual(gradBeta, {
+      status: "suppressed",
+      reason: "complementary",
+    });
+
     // Masked pool row with only 3 pooled voters MUST hide distinctVoters (null) & suppress cells
     const maskedRow = q.rows[2];
     assert.equal(maskedRow.distinctVoters, null);
     assert.equal(maskedRow.pooledOptionCount, 1);
     assert.deepEqual(maskedRow.overallCell, { status: "suppressed" });
 
-    // Unsurveyed row has 0 exposures on beta -> "empty"
+    // Unsurveyed row has 0 exposures on beta -> "empty"; on alpha (total 19 voters, 3 Alumni hidden),
+    // unsurveyed (n=5) is preferred first for complementary suppression so Undergrad vs Grad stays visible!
     const unsurveyedRow = q.rows[3];
     assert.deepEqual(unsurveyedRow.cellsByFlavorKey["flavor:2"], {
       status: "empty",
+    });
+    assert.deepEqual(unsurveyedRow.cellsByFlavorKey["flavor:1"], {
+      status: "suppressed",
+      reason: "complementary",
     });
 
     // Taste gap found strictly between Undergrad (83.33%) and Grad (20%) on alpha (+63.33pp)
@@ -498,7 +512,147 @@ describe("utils/attribution-stats", () => {
     assert.equal(matrix.tasteGaps[0].questionLabel, "School");
     assert.equal(matrix.tasteGaps[0].highAnswerLabel, "Undergrad");
     assert.equal(matrix.tasteGaps[0].lowAnswerLabel, "Grad");
+    assert.equal(matrix.tasteGaps[0].coarsenVoters, true);
     assert.ok(Math.abs(matrix.tasteGaps[0].spreadPp - 63.3333) < 0.01);
+
+    // Regression for Study #20 Q2/Q5 geometry: when unsurveyed (n=50) >> Computer Science (n=14)
+    // with 3 pooled small-cohort voters + 1 question skipper (18 surveyed total),
+    // rowMaskPriority MUST suppress unsurveyed (prio 0) rather than Computer Science (prio 2),
+    // and set coarsenVoterCounts + hideUnsurveyedCount so 18 - 14 = 4 cannot isolate small cohorts!
+    const q5Exposures = [];
+    const q5Responses = [];
+    let q5Id = 1;
+    // 14 CS voters (answer 1)
+    for (let i = 0; i < 14; i += 1) {
+      const uid = `cs_${i}`;
+      q5Responses.push(
+        {
+          id: q5Id++,
+          user_id: uid,
+          answer_question_mapping_id: 201,
+          created_datetime_utc: "2026-10-01T00:00:00Z",
+          modified_datetime_utc: null,
+        },
+        {
+          id: q5Id++,
+          user_id: uid,
+          answer_question_mapping_id: 301,
+          created_datetime_utc: "2026-10-01T00:00:00Z",
+          modified_datetime_utc: null,
+        },
+      );
+      q5Exposures.push({
+        profileId: uid,
+        mappingId: 1,
+        captionId: "cA",
+        isPositive: i < 7,
+        dwellMs: 1200,
+        firstSeenUtc: "t",
+        firstEventId: q5Id,
+      });
+    }
+    // 3 Math voters (< 5 -> pooled on Q5, answered Q2)
+    for (let i = 0; i < 3; i += 1) {
+      const uid = `math_${i}`;
+      q5Responses.push(
+        {
+          id: q5Id++,
+          user_id: uid,
+          answer_question_mapping_id: 202,
+          created_datetime_utc: "2026-10-01T00:00:00Z",
+          modified_datetime_utc: null,
+        },
+        {
+          id: q5Id++,
+          user_id: uid,
+          answer_question_mapping_id: 302,
+          created_datetime_utc: "2026-10-01T00:00:00Z",
+          modified_datetime_utc: null,
+        },
+      );
+      q5Exposures.push({
+        profileId: uid,
+        mappingId: 1,
+        captionId: "cA",
+        isPositive: false,
+        dwellMs: 1200,
+        firstSeenUtc: "t",
+        firstEventId: q5Id,
+      });
+    }
+    // 1 surveyed voter who answered Q10 (id 99) only and skipped both Q5 and Q2
+    q5Responses.push({
+      id: q5Id++,
+      user_id: "skipper_0",
+      answer_question_mapping_id: 401,
+      created_datetime_utc: "2026-10-01T00:00:00Z",
+      modified_datetime_utc: null,
+    });
+    q5Exposures.push({
+      profileId: "skipper_0",
+      mappingId: 1,
+      captionId: "cA",
+      isPositive: true,
+      dwellMs: 1200,
+      firstSeenUtc: "t",
+      firstEventId: q5Id++,
+    });
+    // 49 unsurveyed voters -> 50 total unsurveyed on Q5 & Q2 (>> 14 CS voters!)
+    for (let i = 0; i < 49; i += 1) {
+      q5Exposures.push({
+        profileId: `u_unsurv_${i}`,
+        mappingId: 1,
+        captionId: "cA",
+        isPositive: i % 2 === 0,
+        dwellMs: 1200,
+        firstSeenUtc: "t",
+        firstEventId: 5000 + i,
+      });
+    }
+
+    const q5Boards = buildAttributionLeaderboards({
+      mappedCaptionIds: ["cA"],
+      captionsById,
+      exposures: q5Exposures,
+    });
+    const q5Matrix = buildDemographicCohortMatrices({
+      exposures: q5Exposures,
+      captionsById,
+      flavorRows: q5Boards.flavors,
+      questions: [
+        { id: 2, question: "Are you currently living on campus?" },
+        { id: 5, question: "What is your major?" },
+        { id: 99, question: "Anchor?" },
+      ],
+      answers: [
+        { id: 11, answer: "Computer Science" },
+        { id: 12, answer: "Mathematics" },
+        { id: 21, answer: "Yes" },
+        { id: 22, answer: "No" },
+        { id: 31, answer: "Anchored" },
+      ],
+      mappings: [
+        { id: 201, question_id: 5, answer_id: 11, display_order: 1, is_deleted: false },
+        { id: 202, question_id: 5, answer_id: 12, display_order: 2, is_deleted: false },
+        { id: 301, question_id: 2, answer_id: 21, display_order: 1, is_deleted: false },
+        { id: 302, question_id: 2, answer_id: 22, display_order: 2, is_deleted: false },
+        { id: 401, question_id: 99, answer_id: 31, display_order: 1, is_deleted: false },
+      ],
+      responses: q5Responses,
+    });
+
+    const majorQ = q5Matrix.questions.find((item) => item.questionId === 5)!;
+    const csRow = majorQ.rows.find((r) => r.label === "Computer Science")!;
+    const majorUnsurvRow = majorQ.rows.find((r) => r.rowKind === "unsurveyed")!;
+    assert.equal(csRow.overallCell.status, "visible");
+    assert.equal(csRow.cellsByFlavorKey["flavor:1"]?.status, "visible");
+    assert.deepEqual(majorUnsurvRow.overallCell, {
+      status: "suppressed",
+      reason: "complementary",
+    });
+    assert.equal(majorQ.visibleSegmentCount, 1);
+    assert.equal(majorQ.coarsenVoterCounts, true);
+    assert.equal(majorQ.hideUnsurveyedCount, true);
   });
 
   it("abbreviates survey questions cleanly and prioritizes solid-sample headline taste gaps", () => {

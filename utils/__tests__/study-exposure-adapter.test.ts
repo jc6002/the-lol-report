@@ -157,6 +157,17 @@ describe("utils/study-exposure-adapter", () => {
         session_id: "s8",
         created_datetime_utc: "2026-10-01T00:00:15+00:00",
       },
+      // Non-positive swipe vote row ("meh") MUST NOT be miscounted as a like
+      {
+        id: 13,
+        profile_id: "u3",
+        caption_id: "c1",
+        study_caption_mapping_id: 100,
+        vote_value: "meh",
+        time_to_vote_ms: 950,
+        session_id: "s9",
+        created_datetime_utc: "2026-10-01T00:00:16+00:00",
+      },
     ];
 
     const res = adaptStudyExposures({
@@ -166,9 +177,10 @@ describe("utils/study-exposure-adapter", () => {
     });
 
     assert.equal(res.mode, "swipe_navigation");
-    assert.equal(res.totalExposures, 2);
-    assert.equal(res.totalPositive, 1);
-    assert.equal(res.distinctVoters, 1);
+    // u1|100 (liked in s2) + u1|101 (cross-session liked in s999) + u2|101 (orphan positive recovered); u3 "meh" ignored!
+    assert.equal(res.totalExposures, 3);
+    assert.equal(res.totalPositive, 3);
+    assert.equal(res.distinctVoters, 2);
     assert.equal(res.medianStudyDwellMs, 3000); // median of [2000, 3000, 4000]
     assert.equal(res.exposures[0].dwellMs, 3000); // median of [2000, 4000]
   });
@@ -421,5 +433,45 @@ describe("utils/study-exposure-adapter", () => {
       { captionPosition: 2, activeUsers: 2, activeSharePct: 100, droppedUsers: 0 },
       { captionPosition: 3, activeUsers: 2, activeSharePct: 100, droppedUsers: 2 },
     ]);
+  });
+
+  it("deduplicates duplicate Likert (profile_id, study_caption_mapping_id) votes keeping latest row and exempts deliberate multi-label raters from monotone_polarity", () => {
+    const votes: RawStudyVoteRow[] = [];
+    // u_deliberate_enthusiast: 10 slow votes (2500ms each) using 2 distinct positive labels ("funny" + "very funny")
+    // plus an earlier duplicate vote on mapping 1 that was revised from "meh" -> "very funny".
+    votes.push({
+      id: 1,
+      profile_id: "u_deliberate_enthusiast",
+      caption_id: "c-0",
+      study_caption_mapping_id: 1,
+      vote_value: "meh",
+      time_to_vote_ms: 2200,
+      session_id: null,
+      created_datetime_utc: "2026-04-17T10:00:00+00:00",
+    });
+    for (let i = 0; i < 10; i += 1) {
+      votes.push({
+        id: 10 + i,
+        profile_id: "u_deliberate_enthusiast",
+        caption_id: `c-${i}`,
+        study_caption_mapping_id: i + 1,
+        vote_value: i % 2 === 0 ? "very funny" : "funny",
+        time_to_vote_ms: 2500,
+        session_id: null,
+        created_datetime_utc: `2026-04-17T10:01:${String(i * 4).padStart(2, "0")}+00:00`,
+      });
+    }
+
+    const res = adaptStudyExposures({
+      studyId: 20,
+      voteRows: votes,
+      navigationRows: [],
+      excludeHighRisk: true,
+    });
+    // Deduped 11 raw rows -> 10 exposures, latest row on mapping 1 ("very funny") kept, and NOT flagged!
+    assert.equal(res.allExposureCount, 10);
+    assert.equal(res.highRiskVoterCount, 0);
+    assert.equal(res.totalExposures, 10);
+    assert.equal(res.totalPositive, 10);
   });
 });

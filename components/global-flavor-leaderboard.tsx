@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Fragment, useDeferredValue, useMemo, useState } from "react";
 
 import { AppSelect, type AppSelectOption } from "@/components/app-select";
+import { computeWilsonConfidenceInterval } from "@/utils/attribution-stats";
 import {
   formatCompactCount,
   formatHubPercent,
@@ -12,6 +13,108 @@ import {
   getLiftToneClassName,
 } from "@/utils/attribution-ui-helpers";
 import type { GlobalFlavorLeaderboardRow } from "@/utils/global-attribution-loader";
+
+type GlobalEraFilter = "all" | "swipe" | "rating";
+
+const parseInitialEra = (raw?: string): GlobalEraFilter => {
+  const normalized = raw?.trim().toLowerCase();
+  if (normalized === "swipe") return "swipe";
+  if (
+    normalized === "rating" ||
+    normalized === "rating scale" ||
+    normalized === "likert"
+  ) {
+    return "rating";
+  }
+  return "all";
+};
+
+const syncFlavorUrlParams = (updates: {
+  q?: string | null;
+  era?: GlobalEraFilter | null;
+  flavor?: string | null;
+}) => {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  if (updates.q !== undefined) {
+    const trimmed = updates.q?.trim() ?? "";
+    if (trimmed.length > 0) params.set("q", trimmed);
+    else params.delete("q");
+  }
+  if (updates.era !== undefined) {
+    if (updates.era && updates.era !== "all") params.set("era", updates.era);
+    else params.delete("era");
+  }
+  if (updates.flavor !== undefined) {
+    if (updates.flavor) params.set("flavor", updates.flavor);
+    else params.delete("flavor");
+  }
+  const nextQuery = params.toString();
+  window.history.replaceState(
+    window.history.state,
+    "",
+    nextQuery
+      ? `${window.location.pathname}?${nextQuery}`
+      : window.location.pathname,
+  );
+};
+
+const pickFlavorEraMetrics = (
+  row: GlobalFlavorLeaderboardRow,
+  era: GlobalEraFilter,
+) => {
+  if (era === "all") {
+    return {
+      studyCount: row.studyCount,
+      captionCount: row.captionCount,
+      exposures: row.exposures,
+      positive: row.positive,
+      rate: row.rate,
+      ciLow: row.ciLow,
+      ciHigh: row.ciHigh,
+      sharedImageCount: row.sharedImageCount,
+      meanLiftPp: row.meanLiftPp,
+      pairWins: row.pairWins,
+      pairLosses: row.pairLosses,
+      pairTies: row.pairTies,
+      studies: row.studies,
+    };
+  }
+  const isSwipe = era === "swipe";
+  const matchingStudies = row.studies.filter((study) =>
+    isSwipe
+      ? study.exposureMode === "swipe_navigation"
+      : study.exposureMode !== "swipe_navigation",
+  );
+  const exposures = isSwipe ? row.swipeExposures : row.ratingScaleExposures;
+  const positive = isSwipe ? row.swipePositive : row.ratingScalePositive;
+  const ci = computeWilsonConfidenceInterval(positive, exposures);
+  const captionCount = matchingStudies.reduce(
+    (sum, study) => sum + study.captionCount,
+    0,
+  );
+  return {
+    studyCount: isSwipe ? row.swipeStudyCount : row.ratingScaleStudyCount,
+    captionCount,
+    exposures,
+    positive,
+    rate: ci.rate,
+    ciLow: ci.low,
+    ciHigh: ci.high,
+    sharedImageCount:
+      (isSwipe
+        ? row.swipeSharedImageCount
+        : row.ratingScaleSharedImageCount) ?? 0,
+    meanLiftPp: isSwipe
+      ? (row.swipeMeanLiftPp ?? null)
+      : (row.ratingScaleMeanLiftPp ?? null),
+    pairWins: (isSwipe ? row.swipePairWins : row.ratingScalePairWins) ?? 0,
+    pairLosses:
+      (isSwipe ? row.swipePairLosses : row.ratingScalePairLosses) ?? 0,
+    pairTies: (isSwipe ? row.swipePairTies : row.ratingScalePairTies) ?? 0,
+    studies: matchingStudies,
+  };
+};
 
 type FlavorSortMode =
   | "ci_low"
@@ -87,12 +190,14 @@ export function GlobalFlavorLeaderboard({
   unusedFlavorCount,
   initialFlavorParam,
   initialQuery = "",
+  initialEraParam,
   onClearEntityFocus,
 }: {
   flavors: GlobalFlavorLeaderboardRow[];
   unusedFlavorCount: number;
   initialFlavorParam?: string;
   initialQuery?: string;
+  initialEraParam?: string;
   onClearEntityFocus?: () => void;
 }) {
   const matchedInitialFlavor = useMemo(() => {
@@ -114,6 +219,9 @@ export function GlobalFlavorLeaderboard({
   );
   const [missingNoticeDismissed, setMissingNoticeDismissed] = useState(false);
   const [searchQuery, setSearchQuery] = useState(initialQuery);
+  const [eraFilter, setEraFilter] = useState<GlobalEraFilter>(() =>
+    parseInitialEra(initialEraParam),
+  );
   const [sortMode, setSortMode] = useState<FlavorSortMode>("ci_low");
   const [expandedIds, setExpandedIds] = useState<Set<number>>(() =>
     matchedInitialFlavor ? new Set([matchedInitialFlavor.flavorId]) : new Set(),
@@ -136,6 +244,7 @@ export function GlobalFlavorLeaderboard({
   const clearPinnedFlavor = () => {
     setPinnedFlavorId(null);
     setMissingNoticeDismissed(true);
+    syncFlavorUrlParams({ flavor: null });
     onClearEntityFocus?.();
   };
 
@@ -144,6 +253,15 @@ export function GlobalFlavorLeaderboard({
     const filtered = flavors.filter((row) => {
       if (pinnedFlavorId !== null) {
         return row.flavorId === pinnedFlavorId;
+      }
+      if (eraFilter !== "all") {
+        const eraExposures =
+          eraFilter === "swipe"
+            ? row.swipeExposures
+            : row.ratingScaleExposures;
+        if (eraExposures <= 0) {
+          return false;
+        }
       }
       if (trimmed.length === 0) {
         return true;
@@ -174,34 +292,36 @@ export function GlobalFlavorLeaderboard({
     });
 
     return [...filtered].sort((left, right) => {
+      const l = pickFlavorEraMetrics(left, eraFilter);
+      const r = pickFlavorEraMetrics(right, eraFilter);
       if (sortMode === "lift") {
-        const cmp = compareNullableDesc(left.meanLiftPp, right.meanLiftPp);
+        const cmp = compareNullableDesc(l.meanLiftPp, r.meanLiftPp);
         if (cmp !== 0) return cmp;
       } else if (sortMode === "exposures") {
-        if (left.exposures !== right.exposures) {
-          return right.exposures - left.exposures;
+        if (l.exposures !== r.exposures) {
+          return r.exposures - l.exposures;
         }
       } else if (sortMode === "studies") {
-        if (left.studyCount !== right.studyCount) {
-          return right.studyCount - left.studyCount;
+        if (l.studyCount !== r.studyCount) {
+          return r.studyCount - l.studyCount;
         }
-        if (left.exposures !== right.exposures) {
-          return right.exposures - left.exposures;
+        if (l.exposures !== r.exposures) {
+          return r.exposures - l.exposures;
         }
       } else if (sortMode === "slug") {
         return left.slug.localeCompare(right.slug);
       }
 
-      const ciCmp = compareNullableDesc(left.ciLow, right.ciLow);
+      const ciCmp = compareNullableDesc(l.ciLow, r.ciLow);
       if (ciCmp !== 0) return ciCmp;
-      const rateCmp = compareNullableDesc(left.rate, right.rate);
+      const rateCmp = compareNullableDesc(l.rate, r.rate);
       if (rateCmp !== 0) return rateCmp;
-      if (left.exposures !== right.exposures) {
-        return right.exposures - left.exposures;
+      if (l.exposures !== r.exposures) {
+        return r.exposures - l.exposures;
       }
       return left.slug.localeCompare(right.slug);
     });
-  }, [flavors, deferredQuery, pinnedFlavorId, sortMode]);
+  }, [flavors, deferredQuery, pinnedFlavorId, eraFilter, sortMode]);
 
   const pinnedFlavor =
     pinnedFlavorId !== null
@@ -213,87 +333,93 @@ export function GlobalFlavorLeaderboard({
     matchedInitialFlavor === null &&
     !missingNoticeDismissed;
 
-  const renderExpandedBreakdown = (row: GlobalFlavorLeaderboardRow) => (
-    <div className="space-y-3 rounded-xl border border-slate-200/75 bg-white/65 p-3.5 text-xs dark:border-slate-700/75 dark:bg-slate-950/45">
-      {row.description ? (
-        <p className="leading-relaxed text-foreground">{row.description}</p>
-      ) : null}
+  const renderExpandedBreakdown = (row: GlobalFlavorLeaderboardRow) => {
+    const eraMetrics = pickFlavorEraMetrics(row, eraFilter);
+    const studiesToShow =
+      eraMetrics.studies.length > 0 ? eraMetrics.studies : row.studies;
 
-      {row.pipelineSteps.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {row.pipelineSteps.map((step, index) => (
-            <span
-              key={`${row.flavorId}-step-${index}`}
-              className="inline-flex items-center gap-1 rounded-md bg-slate-900/[0.05] px-2 py-0.5 font-mono text-[11px] text-foreground dark:bg-white/[0.08]"
-            >
-              <span className="app-muted">Step {index + 1}:</span>
-              <span>{step}</span>
-            </span>
-          ))}
-        </div>
-      ) : null}
+    return (
+      <div className="space-y-3 rounded-xl border border-slate-200/75 bg-white/65 p-3.5 text-xs dark:border-slate-700/75 dark:bg-slate-950/45">
+        {row.description ? (
+          <p className="leading-relaxed text-foreground">{row.description}</p>
+        ) : null}
 
-      <div className="space-y-1.5">
-        {row.studies.map((study) => (
-          <div
-            key={`${row.flavorId}-study-${study.studyId}`}
-            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200/70 bg-white/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/70"
-          >
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="app-muted font-mono tabular-nums">
-                  #{study.studyId}
-                </span>
-                <span className="font-semibold text-foreground">
-                  {study.studyTitle}
-                </span>
-                <span
-                  className={
-                    study.exposureMode === "swipe_navigation"
-                      ? "inline-flex rounded bg-sky-500/14 px-1.5 py-0.5 text-[11px] font-medium text-slate-900 ring-1 ring-sky-500/30 dark:text-sky-100"
-                      : "inline-flex rounded bg-amber-500/16 px-1.5 py-0.5 text-[11px] font-medium text-amber-900 ring-1 ring-amber-500/30 dark:text-amber-100"
-                  }
-                >
-                  {study.formatDisplayLabel}
-                </span>
-              </div>
-              <p className="app-muted mt-0.5 tabular-nums">
-                {study.captionCount.toLocaleString()}{" "}
-                {study.captionCount === 1 ? "caption" : "captions"} ·{" "}
-                {study.exposures > 0
-                  ? `${study.exposures.toLocaleString()} ${
-                      study.exposureMode === "swipe_navigation"
-                        ? "views"
-                        : "votes"
-                    } · ${formatHubPercent(study.rate)}`
-                  : "0 votes yet"}
-                {study.meanLiftPp !== null
-                  ? ` · ${formatSignedLiftPp(study.meanLiftPp)} lift`
-                  : ""}
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Link
-                href={study.attributionHref}
-                className="app-button inline-flex h-7 items-center rounded-md px-2.5 text-[11px] font-medium transition"
+        {row.pipelineSteps.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {row.pipelineSteps.map((step, index) => (
+              <span
+                key={`${row.flavorId}-step-${index}`}
+                className="inline-flex items-center gap-1 rounded-md bg-slate-900/[0.05] px-2 py-0.5 font-mono text-[11px] text-foreground dark:bg-white/[0.08]"
               >
-                Attribution →
-              </Link>
-              {study.headToHeadHref ? (
+                <span className="app-muted">Step {index + 1}:</span>
+                <span>{step}</span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="space-y-1.5">
+          {studiesToShow.map((study) => (
+            <div
+              key={`${row.flavorId}-study-${study.studyId}`}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200/70 bg-white/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/70"
+            >
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="app-muted font-mono tabular-nums">
+                    #{study.studyId}
+                  </span>
+                  <span className="font-semibold text-foreground">
+                    {study.studyTitle}
+                  </span>
+                  <span
+                    className={
+                      study.exposureMode === "swipe_navigation"
+                        ? "inline-flex rounded bg-sky-500/14 px-1.5 py-0.5 text-[11px] font-medium text-slate-900 dark:text-sky-100"
+                        : "inline-flex rounded bg-amber-500/16 px-1.5 py-0.5 text-[11px] font-medium text-amber-900 dark:text-amber-100"
+                    }
+                  >
+                    {study.formatDisplayLabel}
+                  </span>
+                </div>
+                <p className="app-muted mt-0.5 tabular-nums">
+                  {study.captionCount.toLocaleString()}{" "}
+                  {study.captionCount === 1 ? "caption" : "captions"} ·{" "}
+                  {study.exposures > 0
+                    ? `${study.exposures.toLocaleString()} ${
+                        study.exposureMode === "swipe_navigation"
+                          ? "views"
+                          : "votes"
+                      } · ${formatHubPercent(study.rate)}`
+                    : "0 votes yet"}
+                  {study.meanLiftPp !== null
+                    ? ` · ${formatSignedLiftPp(study.meanLiftPp)} lift`
+                    : ""}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
                 <Link
-                  href={study.headToHeadHref}
+                  href={study.attributionHref}
                   className="app-button inline-flex h-7 items-center rounded-md px-2.5 text-[11px] font-medium transition"
                 >
-                  Head-to-Head →
+                  Attribution →
                 </Link>
-              ) : null}
+                {study.headToHeadHref ? (
+                  <Link
+                    href={study.headToHeadHref}
+                    className="app-button inline-flex h-7 items-center rounded-md px-2.5 text-[11px] font-medium transition"
+                  >
+                    Head-to-Head →
+                  </Link>
+                ) : null}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="space-y-3" aria-busy={deferredQuery !== searchQuery}>
@@ -335,24 +461,64 @@ export function GlobalFlavorLeaderboard({
       ) : null}
 
       <div className="flex flex-wrap items-center justify-between gap-2.5">
-        <div className="relative w-full sm:w-96">
-          <Search
-            aria-hidden="true"
-            className="app-muted pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2"
-          />
-          <input
-            type="search"
-            value={searchQuery}
-            onChange={(event) => {
-              if (pinnedFlavorId !== null) {
-                setPinnedFlavorId(null);
-              }
-              setSearchQuery(event.target.value);
-            }}
-            placeholder="Filter evaluated flavors, prompts, or models..."
-            aria-label="Filter evaluated prompt flavors"
-            className="app-input h-9 w-full rounded-lg pl-9 pr-3 text-sm outline-none"
-          />
+        <div className="flex w-full flex-wrap items-center gap-2 lg:w-auto">
+          <div className="relative w-full sm:w-80">
+            <Search
+              aria-hidden="true"
+              className="app-muted pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2"
+            />
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                if (pinnedFlavorId !== null) {
+                  setPinnedFlavorId(null);
+                  syncFlavorUrlParams({ q: nextValue, flavor: null });
+                } else {
+                  syncFlavorUrlParams({ q: nextValue });
+                }
+                setSearchQuery(nextValue);
+              }}
+              placeholder="Filter evaluated flavors, prompts, or models..."
+              aria-label="Filter evaluated prompt flavors"
+              className="app-input h-9 w-full rounded-lg pl-9 pr-3 text-sm outline-none"
+            />
+          </div>
+
+          <div
+            role="group"
+            aria-label="Filter by study format era"
+            className="app-input inline-flex max-w-full items-center gap-1 overflow-x-auto overflow-y-hidden rounded-lg p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          >
+            {(
+              [
+                { id: "all", label: "All" },
+                { id: "swipe", label: "Swipe" },
+                { id: "rating", label: "Rating scale" },
+              ] as const
+            ).map((opt) => {
+              const active = eraFilter === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => {
+                    setEraFilter(opt.id);
+                    syncFlavorUrlParams({ era: opt.id });
+                  }}
+                  className={`h-7 shrink-0 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition ${
+                    active
+                      ? "bg-white text-slate-950 shadow-sm dark:bg-cyan-300/20 dark:text-cyan-50"
+                      : "app-muted hover:text-foreground"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -365,26 +531,35 @@ export function GlobalFlavorLeaderboard({
             className="w-56 rounded-lg text-xs sm:w-60 sm:text-sm"
           />
           <span className="app-muted text-xs tabular-nums">
-            {visibleRows.length} of {flavors.length} evaluated
-            {unusedFlavorCount > 0
-              ? ` · ${unusedFlavorCount} unmapped drafts hidden`
-              : ""}
+            {eraFilter === "swipe"
+              ? `${visibleRows.length} of ${flavors.length} evaluated in Swipe`
+              : eraFilter === "rating"
+                ? `${visibleRows.length} of ${flavors.length} evaluated in Rating scale`
+                : `${visibleRows.length} of ${flavors.length} evaluated${
+                    unusedFlavorCount > 0
+                      ? ` · ${unusedFlavorCount} unmapped drafts hidden`
+                      : ""
+                  }`}
           </span>
         </div>
       </div>
 
       {visibleRows.length === 0 ? (
         <div className="app-card flex flex-col items-center justify-center gap-3 rounded-xl p-6 text-center text-sm">
-          <p className="app-muted">No evaluated flavors match this filter.</p>
+          <p className="app-muted">No evaluated flavors match these filters.</p>
           <button
             type="button"
             onClick={() => {
               setSearchQuery("");
-              clearPinnedFlavor();
+              setEraFilter("all");
+              setPinnedFlavorId(null);
+              setMissingNoticeDismissed(true);
+              syncFlavorUrlParams({ q: null, era: "all", flavor: null });
+              onClearEntityFocus?.();
             }}
             className="app-button inline-flex h-9 items-center rounded-lg px-3 text-xs font-medium transition"
           >
-            Reset filter
+            Reset filters
           </button>
         </div>
       ) : (
@@ -393,6 +568,7 @@ export function GlobalFlavorLeaderboard({
           <div className="space-y-2.5 md:hidden">
             {visibleRows.map((row, index) => {
               const isExpanded = expandedIds.has(row.flavorId);
+              const m = pickFlavorEraMetrics(row, eraFilter);
               return (
                 <article
                   key={row.flavorId}
@@ -421,26 +597,32 @@ export function GlobalFlavorLeaderboard({
                       </div>
                       <p className="app-muted mt-1 line-clamp-1 pl-5 text-xs">
                         {row.primarySynthesisModel ?? "Unattributed"} ·{" "}
-                        {row.studyCount}{" "}
-                        {row.studyCount === 1 ? "study" : "studies"} ·{" "}
-                        {row.exposures > 0
-                          ? `${formatCompactCount(row.exposures)} votes/views`
+                        {m.studyCount}{" "}
+                        {m.studyCount === 1 ? "study" : "studies"} ·{" "}
+                        {m.exposures > 0
+                          ? `${formatCompactCount(m.exposures)} ${
+                              eraFilter === "swipe"
+                                ? "views"
+                                : eraFilter === "rating"
+                                  ? "votes"
+                                  : "votes/views"
+                            }`
                           : "0 votes yet"}
                       </p>
                     </div>
 
                     <div className="shrink-0 text-right tabular-nums">
                       <p className="text-sm font-semibold text-foreground">
-                        {formatHubPercent(row.rate)}
+                        {formatHubPercent(m.rate)}
                       </p>
                       <p
                         className={`text-xs font-medium ${getLiftToneClassName(
-                          row.meanLiftPp,
+                          m.meanLiftPp,
                         )}`}
                       >
-                        {row.meanLiftPp !== null
-                          ? `${formatSignedLiftPp(row.meanLiftPp)} lift`
-                          : row.exposures > 0
+                        {m.meanLiftPp !== null
+                          ? `${formatSignedLiftPp(m.meanLiftPp)} lift`
+                          : m.exposures > 0
                             ? "1-flavor runs"
                             : "Staged"}
                       </p>
@@ -501,6 +683,7 @@ export function GlobalFlavorLeaderboard({
               <tbody className="divide-y divide-slate-200/50 dark:divide-slate-800/70">
                 {visibleRows.map((row, index) => {
                   const isExpanded = expandedIds.has(row.flavorId);
+                  const m = pickFlavorEraMetrics(row, eraFilter);
                   return (
                     <Fragment key={row.flavorId}>
                       <tr className="transition hover:bg-slate-900/[0.03] dark:hover:bg-white/[0.03]">
@@ -534,8 +717,8 @@ export function GlobalFlavorLeaderboard({
                               <span className="app-kicker mt-1 inline-block text-[11px] font-medium">
                                 {isExpanded
                                   ? "Hide study breakdown"
-                                  : `View ${row.studyCount} ${
-                                      row.studyCount === 1 ? "study" : "studies"
+                                  : `View ${m.studyCount} ${
+                                      m.studyCount === 1 ? "study" : "studies"
                                     } & prompt steps`}
                               </span>
                             </span>
@@ -555,47 +738,51 @@ export function GlobalFlavorLeaderboard({
 
                         <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
                           <span className="font-semibold text-foreground">
-                            {row.studyCount}{" "}
-                            {row.studyCount === 1 ? "study" : "studies"}
+                            {m.studyCount}{" "}
+                            {m.studyCount === 1 ? "study" : "studies"}
                           </span>
                           <span className="app-muted mt-0.5 block text-xs">
-                            {row.captionCount.toLocaleString()} captions
+                            {m.captionCount.toLocaleString()} captions
                           </span>
                         </td>
 
                         <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
                           <span className="font-semibold text-foreground">
-                            {row.exposures.toLocaleString()}
+                            {m.exposures.toLocaleString()}
                           </span>
                           <span className="app-muted mt-0.5 block text-xs">
-                            {row.swipeExposures > 0 &&
-                            row.ratingScaleExposures > 0
-                              ? `${formatCompactCount(row.swipeExposures)} swipe · ${formatCompactCount(row.ratingScaleExposures)} rating`
-                              : row.swipeExposures > 0
-                                ? "Swipe views"
-                                : row.ratingScaleExposures > 0
-                                  ? "Rating votes"
-                                  : "Staged only"}
+                            {eraFilter === "swipe"
+                              ? "Swipe views"
+                              : eraFilter === "rating"
+                                ? "Rating votes"
+                                : row.swipeExposures > 0 &&
+                                    row.ratingScaleExposures > 0
+                                  ? `${formatCompactCount(row.swipeExposures)} swipe · ${formatCompactCount(row.ratingScaleExposures)} rating`
+                                  : row.swipeExposures > 0
+                                    ? "Swipe views"
+                                    : row.ratingScaleExposures > 0
+                                      ? "Rating votes"
+                                      : "Staged only"}
                           </span>
                         </td>
 
                         <td className="whitespace-nowrap px-3.5 py-3 text-right align-top">
-                          {renderRateBar(row)}
+                          {renderRateBar(m)}
                         </td>
 
                         <td className="whitespace-nowrap px-3.5 py-3 text-right align-top tabular-nums">
                           <span
                             className={`font-semibold ${getLiftToneClassName(
-                              row.meanLiftPp,
+                              m.meanLiftPp,
                             )}`}
                           >
-                            {formatSignedLiftPp(row.meanLiftPp)}
+                            {formatSignedLiftPp(m.meanLiftPp)}
                           </span>
-                          {row.sharedImageCount > 0 ? (
+                          {m.sharedImageCount > 0 ? (
                             <span className="app-muted mt-0.5 block text-xs">
-                              {row.sharedImageCount} shared img · {row.pairWins}W–
-                              {row.pairLosses}L
-                              {row.pairTies > 0 ? `–${row.pairTies}T` : ""}
+                              {m.sharedImageCount} shared img · {m.pairWins}W–
+                              {m.pairLosses}L
+                              {m.pairTies > 0 ? `–${m.pairTies}T` : ""}
                             </span>
                           ) : (
                             <span className="app-muted mt-0.5 block text-xs">

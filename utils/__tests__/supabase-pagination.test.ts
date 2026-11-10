@@ -124,6 +124,20 @@ describe("utils/supabase-pagination", () => {
       [1, 2, 3, 4, 5],
     );
 
+    // Drains hosted PostgREST db-max-rows=1000 caps losslessly when pageSize > 1000.
+    const all2500 = Array.from({ length: 2500 }, (_, idx) => ({ id: idx + 1 }));
+    const drained = await fetchRowsByIdChunks<number, { id: number }>({
+      ids: [1],
+      contextLabel: "db-max-rows=1000 cap",
+      pageSize: 4500,
+      runQuery: async (_chunk, from, to) => ({
+        data: all2500.slice(from, Math.min(to + 1, from + 1000)),
+        error: null,
+      }),
+    });
+    assert.equal(drained.length, 2500);
+    assert.equal(drained[2499]?.id, 2500);
+
     await assert.rejects(
       () =>
         fetchRowsByIdChunks({
@@ -230,5 +244,32 @@ describe("utils/supabase-pagination", () => {
         }),
       /Unable to probe bad probe: invalid syntax/,
     );
+  });
+
+  it("fans out multi-page fetchAllRows concurrently when countQuery reports exact total > pageSize", async () => {
+    const totalRows = 11;
+    const all = Array.from({ length: totalRows }, (_, i) => ({ id: i + 1 }));
+    let activePages = 0;
+    let peakActivePages = 0;
+
+    const loaded = await fetchAllRows<{ id: number }>({
+      pageSize: 3,
+      concurrency: 3,
+      contextLabel: "parallel paged rows",
+      countQuery: async () => ({ count: totalRows, error: null }),
+      runQuery: async (from, to) => {
+        activePages += 1;
+        peakActivePages = Math.max(peakActivePages, activePages);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        activePages -= 1;
+        return { data: all.slice(from, to + 1), error: null };
+      },
+    });
+
+    assert.deepEqual(
+      loaded.map((r) => r.id),
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    );
+    assert.ok(peakActivePages >= 2 && peakActivePages <= 3);
   });
 });

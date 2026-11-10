@@ -97,6 +97,18 @@ function createFakeSupabaseClient(
           filters.push((row) => set.has(row[col]));
           return builder;
         },
+        is(col: string, val: unknown) {
+          filters.push((row) => (row[col] ?? null) === val);
+          return builder;
+        },
+        not(col: string, op: string, val: unknown) {
+          if (op === "is") {
+            filters.push((row) => (row[col] ?? null) !== val);
+          } else if (op === "eq") {
+            filters.push((row) => row[col] !== val);
+          }
+          return builder;
+        },
         order(col: string, opts?: { ascending?: boolean }) {
           orders.push({ col, ascending: opts?.ascending !== false });
           return builder;
@@ -629,6 +641,20 @@ describe("utils/study-lineage-loader", () => {
       })),
       [{ studyId: 122, exposures: 1, positive: 1 }],
     );
+
+    const headBeforeSeeded = counters.headCalls;
+    const seededTraj = await fetchFlavorCrossStudyTrajectoriesWithClient(
+      supabase,
+      [115],
+      {
+        precomputedStudy: {
+          studyId: 8,
+          pointsByFlavorId: new Map([[115, trajectories[115][0]]]),
+        },
+      },
+    );
+    assert.equal(counters.headCalls - headBeforeSeeded, 0);
+    assert.equal(seededTraj[115]?.[0]?.exposures, 3);
   });
 
   it("enforces live auth.getUser() + isSuperadminProfile before shared cache read/write (Gap G5) plus TTL & LRU eviction", async () => {
@@ -1152,6 +1178,22 @@ describe("utils/study-lineage-loader", () => {
     });
     assert.equal(concurrentPages.length, 10);
     assert.equal(peakActivePages, 8);
+
+    // Drains sub-windows losslessly when server enforces a smaller db-max-rows cap than pageSize.
+    const cappedRows = await fetchChunkedRowsConcurrently<number, { id: number }>({
+      ids: [1],
+      contextLabel: "db-max-rows cap check",
+      pageSize: 5,
+      runCountQuery: async () => ({ count: 5, error: null }),
+      runPageQuery: async (_chunk, from, to) => {
+        const all = [{ id: 0 }, { id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+        return { data: all.slice(from, Math.min(to + 1, from + 2)), error: null };
+      },
+    });
+    assert.deepEqual(
+      cappedRows.map((r) => r.id),
+      [0, 1, 2, 3, 4],
+    );
 
     // Permanent SQL errors on both HEAD count and range page queries preserve contextLabel
     await assert.rejects(

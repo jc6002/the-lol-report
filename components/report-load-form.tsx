@@ -91,18 +91,6 @@ export function ReportLoadForm({
     });
   };
 
-  const handleChange = (event: FormEvent<HTMLFormElement>) => {
-    if (!(event.target instanceof HTMLSelectElement)) {
-      return;
-    }
-
-    if (!pathBuilder || event.target.name !== pathBuilder.fieldName) {
-      return;
-    }
-
-    event.currentTarget.requestSubmit();
-  };
-
   const handleKeyDown = (event: KeyboardEvent<HTMLFormElement>) => {
     if (event.key !== "Enter") {
       return;
@@ -122,7 +110,6 @@ export function ReportLoadForm({
         method="get"
         action={pathname}
         onSubmit={handleSubmit}
-        onChange={handleChange}
         onKeyDown={handleKeyDown}
         className={className}
         aria-busy={isPending}

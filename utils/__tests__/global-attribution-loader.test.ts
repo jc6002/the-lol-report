@@ -496,9 +496,11 @@ const buildGlobalFixtureStore = (): TableStore => ({
     { id: 15, profile_id: "v2", study_caption_mapping_id: 2, vote_value: "not very funny", session_id: null },
     { id: 16, profile_id: "v3", study_caption_mapping_id: 2, vote_value: "not funny at all", session_id: null },
     { id: 17, profile_id: "v4", study_caption_mapping_id: 2, vote_value: "didnt get it", session_id: null },
-    // Study 122 swipe votes: u1 likes map 3 in s2 (matches nav #2); u2 vote in s9 does not match s1 nav
+    // Study 122 swipe votes: u1 likes map 3 in s2 (matches nav #2); u2 vote in s9 recovers via cross-session (u2, map 3);
+    // u1 "meh" vote on map 4 must NOT be miscounted as a Swipe like!
     { id: 20, profile_id: "u1", study_caption_mapping_id: 3, vote_value: "funny", session_id: "s2" },
     { id: 21, profile_id: "u2", study_caption_mapping_id: 3, vote_value: "funny", session_id: "s9" },
+    { id: 22, profile_id: "u1", study_caption_mapping_id: 4, vote_value: "meh", session_id: "s1" },
     // Study 3 legacy Likert tie on img-4: both 1/2 (50%)
     { id: 30, profile_id: "v1", study_caption_mapping_id: 6, vote_value: "funny", session_id: null },
     { id: 31, profile_id: "v2", study_caption_mapping_id: 6, vote_value: "meh", session_id: null },
@@ -710,7 +712,7 @@ describe("Global cross-study attribution loader, Tier-1 fast hub catalog, and se
     const byStudyId = new Map(dataset.studies.map((s) => [s.id, s]));
 
     // Study 20: transitional Likert (>= 7, 0 navs, 8 votes) reports Rating scale & 8 votes
-    // without scanning Likert profile_id voters (voterCount === 0 since 0 participations).
+    // and recovers exact distinct Likert voterCount (4 voters: v1..v4) when study_participations is 0!
     const study20 = byStudyId.get(20)!;
     assert.equal(study20.exposureMode, "likert_votes");
     assert.equal(study20.isTransitionalLikert, true);
@@ -718,19 +720,19 @@ describe("Global cross-study attribution loader, Tier-1 fast hub catalog, and se
     assert.equal(study20.detailHref, "/study/20/study-detail");
     assert.equal(study20.exposureCount, 8);
     assert.equal(study20.positiveCount, 4);
-    assert.equal(study20.voterCount, 0);
+    assert.equal(study20.voterCount, 4);
     assert.equal(study20.flavorCount, 2);
     assert.equal(study20.modelCount, 3); // GPT 5, Gemini 3.5 Flash, Gemini 2.5 Pro (from request-level response)
     assert.equal(study20.sharedImagePairCount, 1);
 
-    // Study 122: Swipe exact parity with adaptSwipeExposures (3 distinct user-card views, 1 matched like)
+    // Study 122: Swipe exact parity with adaptSwipeExposures (3 distinct user-card views, 2 matched positive likes, "meh" ignored)
     const study122 = byStudyId.get(122)!;
     assert.equal(study122.exposureMode, "swipe_navigation");
     assert.equal(study122.formatDisplayLabel, "Swipe");
     assert.equal(study122.detailHref, "/study/122/new-style-report");
     assert.equal(study122.voterCount, 2);
     assert.equal(study122.exposureCount, 3);
-    assert.equal(study122.positiveCount, 1);
+    assert.equal(study122.positiveCount, 2);
     assert.equal(study122.sharedImagePairCount, 0);
     assert.equal(study122.completionRate, 0.5);
     assert.equal(study122.medianRunMinutes, 4);
@@ -753,6 +755,14 @@ describe("Global cross-study attribution loader, Tier-1 fast hub catalog, and se
     assert.equal(f10.meanLiftPp, 12.5);
     assert.equal(f10.pairWins, 1);
     assert.equal(f10.pairTies, 1);
+    // Era-scoped same-image lift fields (Study #122 is 1-flavor Swipe -> 0 shared; Studies #20 & #3 are Rating scale -> 2 shared)
+    assert.equal(f10.swipeSharedImageCount, 0);
+    assert.equal(f10.swipeMeanLiftPp, null);
+    assert.equal(f10.swipePairWins, 0);
+    assert.equal(f10.ratingScaleSharedImageCount, 2);
+    assert.equal(f10.ratingScaleMeanLiftPp, 12.5);
+    assert.equal(f10.ratingScalePairWins, 1);
+    assert.equal(f10.ratingScalePairTies, 1);
     assert.equal(
       f10.studies.find((s) => s.studyId === 20)?.headToHeadHref,
       "/study/20/head-to-head?flavor=flavor-simple-match",
@@ -766,11 +776,19 @@ describe("Global cross-study attribution loader, Tier-1 fast hub catalog, and se
     assert.equal(f30.exposures, 0);
     assert.equal(dataset.flavors[dataset.flavors.length - 1]?.flavorId, 30);
 
-    // Global LLM Models leaderboard
+    // Global LLM Models leaderboard (including Swipe vs Rating scale era breakdown fields)
     const m16 = dataset.models.find((m) => m.modelId === 16)!;
     const m19 = dataset.models.find((m) => m.modelId === 19)!;
     assert.equal(m16.primaryRole, "synthesis");
     assert.equal(m16.medianChainSeconds, 4);
+    assert.equal(m16.synthesisSwipeExposures, 3);
+    assert.equal(m16.synthesisSwipePositive, 2);
+    assert.equal(m16.synthesisRatingScaleExposures, 6);
+    assert.equal(m16.synthesisRatingScalePositive, 4);
+    assert.equal(m16.synthesisSwipeFlavorCount, 2);
+    assert.equal(m16.synthesisRatingScaleFlavorCount, 1);
+    assert.equal(m19.pipelineSwipeFlavorCount, 1);
+    assert.equal(m19.pipelineRatingScaleFlavorCount, 1);
     assert.equal(
       m16.studies.find((s) => s.studyId === 20)?.href,
       "/study/20/attribution?groupBy=model&model=16",
@@ -898,11 +916,12 @@ describe("Global cross-study attribution loader, Tier-1 fast hub catalog, and se
       concurrency: 2,
     });
 
-    // Tier 1 transfers ONLY the 2 Swipe vote rows (study 122) and 0 Likert vote rows,
+    // Tier 1 skips Likert vote scans when study_participations > 0 (Study 15 transfers 0 vote rows!)
+    // and uses bounded anchor skip-scans only for 0-participation Likert studies (Studies 20 & 3)
     // while keeping total simultaneous HTTP requests strictly bounded to concurrency=2!
     assert.equal(fastCounters.notInCalls, 0);
     assert.equal(fastCounters.peakConcurrentQueries, 2);
-    assert.equal(fastCounters.returnedVoteRows, 2);
+    assert.ok(fastCounters.returnedVoteRows <= 18);
     assert.ok(fastCounters.voteHeadCalls >= 4);
 
     const fullClient = createFakeSupabaseClient(store);

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   APP_SELECT_SEARCH_THRESHOLD,
@@ -12,6 +15,7 @@ import {
   shouldShowSelectSearch,
   stepActiveOptionIndex,
 } from "@/utils/app-select-helpers";
+import { buildStudioTabHref } from "@/utils/attribution-ui-helpers";
 
 const SAMPLE_OPTIONS: ReadonlyArray<AppSelectOption> = [
   { value: "123", label: "123 - winter-finale", searchText: "Latest swipe deck" },
@@ -288,5 +292,77 @@ describe("StudySubNav study-switch URL builder", () => {
       }),
       "/study/18/attribution",
     );
+  });
+
+  it("preserves excludeHighRisk=1 and active flavor across Attribution, Demographics, and Head-to-Head tabs", () => {
+    assert.equal(
+      buildStudioTabHref(20, "demographics", true, "flavor-inside-my-head"),
+      "/study/20/demographics?flavor=flavor-inside-my-head&excludeHighRisk=1",
+    );
+    assert.equal(
+      buildStudioTabHref(20, "head-to-head", false, "12"),
+      "/study/20/head-to-head?flavor=12",
+    );
+    assert.equal(
+      buildStudioTabHref(20, "attribution", false, null),
+      "/study/20/attribution",
+    );
+  });
+});
+
+const collectSourceFiles = (dir: string): string[] => {
+  const results: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...collectSourceFiles(fullPath));
+    } else if (entry.isFile() && /\.(ts|tsx)$/.test(entry.name)) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+};
+
+describe("Zero native <select> & AppFormSelect repository invariant (W1.1)", () => {
+  const repoRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../..",
+  );
+
+  it("has zero native <select> tags across all app/ and components/ TypeScript/JSX files", () => {
+    const sourceFiles = [
+      ...collectSourceFiles(path.join(repoRoot, "app")),
+      ...collectSourceFiles(path.join(repoRoot, "components")),
+    ];
+    assert.ok(sourceFiles.length >= 25);
+
+    const violations: string[] = [];
+    for (const filePath of sourceFiles) {
+      const content = fs.readFileSync(filePath, "utf8");
+      if (/<select[\s>]/i.test(content)) {
+        violations.push(path.relative(repoRoot, filePath));
+      }
+    }
+    assert.deepEqual(violations, []);
+  });
+
+  it("exports AppFormSelect from components/app-select.tsx and removes legacy select.app-input CSS", () => {
+    const appSelectSource = fs.readFileSync(
+      path.join(repoRoot, "components/app-select.tsx"),
+      "utf8",
+    );
+    assert.match(appSelectSource, /export function AppFormSelect\b/);
+    assert.match(appSelectSource, /type="hidden"/);
+    assert.match(appSelectSource, /requestSubmit\(\)/);
+
+    const globalsCss = fs.readFileSync(
+      path.join(repoRoot, "app/globals.css"),
+      "utf8",
+    );
+    assert.equal(/select\.app-input/.test(globalsCss), false);
+    // Verify colorful Orange -> Pink -> Sky primary button gradient tokens.
+    assert.match(globalsCss, /#f97316/);
+    assert.match(globalsCss, /#ec4899/);
+    assert.match(globalsCss, /#0ea5e9/);
   });
 });

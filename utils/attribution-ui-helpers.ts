@@ -890,9 +890,19 @@ export function buildStudioTabHref(
   studyId: number,
   tab: StudySubNavTab,
   excludeHighRisk: boolean,
+  flavorParam?: string | null,
 ): string {
   const base = `/study/${studyId}/${tab}`;
-  return excludeHighRisk ? `${base}?excludeHighRisk=1` : base;
+  const params = new URLSearchParams();
+  const trimmedFlavor = flavorParam?.trim();
+  if (trimmedFlavor) {
+    params.set("flavor", trimmedFlavor);
+  }
+  if (excludeHighRisk) {
+    params.set("excludeHighRisk", "1");
+  }
+  const query = params.toString();
+  return query.length > 0 ? `${base}?${query}` : base;
 }
 
 export function formatChainSecondsLabel(seconds: number | null): string {

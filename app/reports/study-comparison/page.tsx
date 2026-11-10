@@ -1,7 +1,14 @@
 import Link from "next/link";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { AppFormSelect } from "@/components/app-select";
+import { TopNavbar } from "@/components/top-navbar";
 import type { Database, Tables } from "@/src/types/supabase";
+import {
+  formatStudyHeaderLabel,
+  formatStudySwitcherOption,
+} from "@/utils/attribution-ui-helpers";
+import { getCachedFastStudyHubCatalog } from "@/utils/global-attribution-loader";
 import {
   type StudyCaptionVoteEventRow,
   isPositiveStudyVote,
@@ -259,23 +266,33 @@ const formatSignedInteger = (value: number) => `${value >= 0 ? "+" : ""}${value}
 
 const formatSignedDecimal = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 
-const getStudyLabel = (study: StudySummary) => {
-  if (study.slug) {
-    return `${study.id} - ${study.slug}`;
-  }
+const windowDateFormatter = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  timeZone: "UTC",
+});
 
-  if (study.description) {
-    return `${study.id} - ${study.description}`;
+const formatWindowEndpoint = (iso: string | null): string => {
+  if (!iso) {
+    return "Open";
   }
-
-  return `Study ${study.id}`;
+  const parsed = Date.parse(iso);
+  if (!Number.isFinite(parsed)) {
+    return iso;
+  }
+  return windowDateFormatter.format(new Date(parsed));
 };
 
 const formatStudyWindow = (study: StudySummary) => {
-  const start = study.start_datetime_utc ?? "n/a";
-  const end = study.end_datetime_utc ?? "n/a";
-
-  return `${start} to ${end}`;
+  if (!study.start_datetime_utc && !study.end_datetime_utc) {
+    return "Not scheduled";
+  }
+  const start = study.start_datetime_utc
+    ? formatWindowEndpoint(study.start_datetime_utc)
+    : "Unscheduled";
+  const end = formatWindowEndpoint(study.end_datetime_utc);
+  return `${start} – ${end}`;
 };
 
 const computeMedian = (values: number[]) => {
@@ -528,13 +545,45 @@ export default async function StudyComparisonPage({
   const params = await searchParams;
   const rawStudyAResult = parseStudyIdParam(params.studyA);
   const rawStudyBResult = parseStudyIdParam(params.studyB);
-  const generatedAtUtc = new Date().toISOString();
 
   const supabase = await createClient();
-  const studies = await getStudies(supabase);
+  const [studies, fastCatalog] = await Promise.all([
+    getStudies(supabase),
+    getCachedFastStudyHubCatalog().catch(() => null),
+  ]);
+  const catalogById = new Map(
+    (fastCatalog?.studies ?? []).map((entry) => [entry.id, entry]),
+  );
+  const scoredStudies = studies.filter((study) => {
+    const cat = catalogById.get(study.id);
+    return cat ? cat.exposureCount > 0 : false;
+  });
+  const defaultPool = scoredStudies.length >= 2 ? scoredStudies : studies;
+
   const studyById = new Map(studies.map((study) => [study.id, study]));
-  const defaultStudyAId = studies[0]?.id ?? null;
-  const defaultStudyBId = studies.find((study) => study.id !== defaultStudyAId)?.id ?? null;
+  const defaultStudyAId = defaultPool[0]?.id ?? studies[0]?.id ?? null;
+  const defaultStudyBId =
+    defaultPool.find((study) => study.id !== defaultStudyAId)?.id ??
+    studies.find((study) => study.id !== defaultStudyAId)?.id ??
+    null;
+
+  const studySelectOptions = studies.map((study) => {
+    const cat = catalogById.get(study.id);
+    return formatStudySwitcherOption({
+      id: study.id,
+      slug: study.slug,
+      description: study.description,
+      title: cat?.title,
+      formatDisplayLabel: cat?.formatDisplayLabel,
+      flavorCount: cat?.flavorCount,
+      modelCount: cat?.modelCount,
+      voterCount: cat?.voterCount,
+      exposureCount: cat?.exposureCount,
+      positiveRate: cat?.positiveRate,
+      flavorSlugs: cat?.flavorSlugs,
+      modelNames: cat?.modelNames,
+    });
+  });
 
   const hasExplicitStudyA = Boolean(params.studyA);
   const hasExplicitStudyB = Boolean(params.studyB);
@@ -628,149 +677,157 @@ export default async function StudyComparisonPage({
       ? buildMetricComparisonRows(studyMetricA, studyMetricB, comparisonDelta)
       : [];
 
+  const includesSwipeStudy =
+    (selectedStudyA !== null &&
+      catalogById.get(selectedStudyA.id)?.exposureMode ===
+        "swipe_navigation") ||
+    (selectedStudyB !== null &&
+      catalogById.get(selectedStudyB.id)?.exposureMode === "swipe_navigation");
+
   return (
-    <main className="page-shell min-h-screen p-6 text-foreground">
-      <section className="app-panel mx-auto w-full max-w-7xl space-y-6 rounded-2xl p-6">
-        <header className="space-y-2">
-          <p className="app-kicker text-xs font-semibold uppercase tracking-[0.24em]">
-            Humor Study Stats
-          </p>
-          <h1 className="text-2xl font-semibold">Study-to-Study Comparison</h1>
-          <p className="app-muted text-sm">
-            Compare two studies using caption coverage and vote-derived humor metrics.
-          </p>
-          <p className="app-muted text-sm">
-            Weighted score formula: total upvotes / total votes.
-          </p>
-          <p className="app-muted text-sm">
-            Generated at: {generatedAtUtc}
-          </p>
-          <form method="get" className="flex flex-wrap items-end gap-3">
-            <label className="app-muted space-y-1 text-sm">
-              <span className="block">Study A</span>
-              <select
-                name="studyA"
-                defaultValue={selectedStudyA?.id.toString() ?? ""}
-                disabled={studies.length === 0}
-                className="app-input h-9 min-w-72 rounded-md px-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {studies.map((study) => (
-                  <option key={`study-a-${study.id}`} value={study.id}>
-                    {getStudyLabel(study)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="app-muted space-y-1 text-sm">
-              <span className="block">Study B</span>
-              <select
-                name="studyB"
-                defaultValue={selectedStudyB?.id.toString() ?? ""}
-                disabled={studies.length === 0}
-                className="app-input h-9 min-w-72 rounded-md px-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {studies.map((study) => (
-                  <option key={`study-b-${study.id}`} value={study.id}>
-                    {getStudyLabel(study)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="submit"
-              disabled={studies.length < 2}
-              className="app-button h-9 rounded-md px-3 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              Refresh
-            </button>
-          </form>
-          {explicitStudyAWasInvalid ? (
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              Invalid `studyA` value. Using the newest study instead.
-            </p>
-          ) : null}
-          {explicitStudyBWasInvalid ? (
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              Invalid `studyB` value. Using the second newest study instead.
-            </p>
-          ) : null}
-          {explicitStudyAMissing ? (
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              Study A ({requestedStudyAId}) was not found in `studies`.
-            </p>
-          ) : null}
-          {explicitStudyBMissing ? (
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              Study B ({requestedStudyBId}) was not found in `studies`.
-            </p>
-          ) : null}
-          {duplicateStudySelectionAdjusted ? (
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              Study A and Study B matched. Study B was automatically adjusted to a different
-              study.
-            </p>
-          ) : null}
-          {studies.length < 2 ? (
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              At least two studies are required for comparison.
-            </p>
-          ) : null}
-          {!hasComparableStudyPair && studies.length >= 2 ? (
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              Select two distinct studies to run the comparison.
-            </p>
-          ) : null}
-          <Link
-            href="/"
-            className="app-button inline-flex rounded-lg px-3 py-2 text-sm font-medium transition"
-          >
-            Back to dashboard
-          </Link>
-        </header>
-
-        <section className="space-y-2">
-          <h2 className="text-lg font-semibold">Report 1: Side-by-Side Metrics</h2>
-          {studyMetricA && studyMetricB && comparisonDelta ? (
-            <div className="app-table-shell overflow-x-auto rounded-xl">
-              <table className="app-table min-w-full divide-y divide-slate-200/60 text-sm dark:divide-slate-700/60">
-                <thead>
-                  <tr>
-                    <th className="px-3 py-2 text-left font-semibold">Metric</th>
-                    <th className="px-3 py-2 text-left font-semibold">
-                      Study A: {getStudyLabel(studyMetricA.study)}
-                    </th>
-                    <th className="px-3 py-2 text-left font-semibold">
-                      Study B: {getStudyLabel(studyMetricB.study)}
-                    </th>
-                    <th className="px-3 py-2 text-left font-semibold">Delta (A - B)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
-                  <tr>
-                    <td className="px-3 py-2">Study window</td>
-                    <td className="px-3 py-2 text-xs">{formatStudyWindow(studyMetricA.study)}</td>
-                    <td className="px-3 py-2 text-xs">{formatStudyWindow(studyMetricB.study)}</td>
-                    <td className="app-muted px-3 py-2">n/a</td>
-                  </tr>
-                  {metricComparisonRows.map((row) => (
-                    <tr key={row.metric}>
-                      <td className="px-3 py-2">{row.metric}</td>
-                      <td className="px-3 py-2">{row.valueA}</td>
-                      <td className="px-3 py-2">{row.valueB}</td>
-                      <td className="px-3 py-2">{row.delta}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+    <div className="flex min-h-screen flex-col bg-background">
+      <TopNavbar />
+      <main className="page-shell flex-1 p-4 text-foreground sm:p-6">
+        <section className="app-panel mx-auto w-full max-w-7xl space-y-6 rounded-2xl p-5 sm:p-6">
+          <header className="space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <Link
+                  href="/"
+                  className="app-kicker inline-flex items-center gap-1 py-1 text-xs font-semibold hover:underline"
+                >
+                  ← Study Hub
+                </Link>
+                <h1 className="mt-1 text-2xl font-semibold">
+                  Study-to-Study Comparison
+                </h1>
+                <p className="app-muted mt-1 text-sm">
+                  Compare two studies across caption deck overlap and recorded vote events.
+                </p>
+              </div>
             </div>
-          ) : (
-            <p className="app-muted text-sm">
-              No comparison data available.
-            </p>
-          )}
-        </section>
+            <form method="get" className="flex flex-wrap items-end gap-3">
+              <div className="app-muted w-full space-y-1 text-sm sm:w-auto">
+                <span className="block">Study A</span>
+                <AppFormSelect
+                  name="studyA"
+                  ariaLabel="Study A"
+                  defaultValue={selectedStudyA?.id.toString() ?? ""}
+                  options={studySelectOptions}
+                  disabled={studies.length === 0}
+                  menuMinWidthPx={320}
+                  menuMaxWidthPx={460}
+                  searchPlaceholder="Search studies by #, title, or flavor..."
+                  className="w-full rounded-lg text-sm sm:w-80"
+                />
+              </div>
+              <div className="app-muted w-full space-y-1 text-sm sm:w-auto">
+                <span className="block">Study B</span>
+                <AppFormSelect
+                  name="studyB"
+                  ariaLabel="Study B"
+                  defaultValue={selectedStudyB?.id.toString() ?? ""}
+                  options={studySelectOptions}
+                  disabled={studies.length === 0}
+                  menuMinWidthPx={320}
+                  menuMaxWidthPx={460}
+                  searchPlaceholder="Search studies by #, title, or flavor..."
+                  className="w-full rounded-lg text-sm sm:w-80"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={studies.length < 2}
+                className="app-button h-9 cursor-pointer rounded-lg px-3.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Compare
+              </button>
+            </form>
+            {includesSwipeStudy ? (
+              <p className="app-muted text-xs">
+                Note: Swipe studies record explicit like events in the vote table; open each study&apos;s Attribution Studio view for seen-card denominators.
+              </p>
+            ) : null}
+            {explicitStudyAWasInvalid ? (
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                Invalid Study A selection. Showing the newest scored study instead.
+              </p>
+            ) : null}
+            {explicitStudyBWasInvalid ? (
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                Invalid Study B selection. Showing the second newest scored study instead.
+              </p>
+            ) : null}
+            {explicitStudyAMissing ? (
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                Study A (#{requestedStudyAId}) was not found.
+              </p>
+            ) : null}
+            {explicitStudyBMissing ? (
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                Study B (#{requestedStudyBId}) was not found.
+              </p>
+            ) : null}
+            {duplicateStudySelectionAdjusted ? (
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                Study A and Study B matched. Study B was automatically adjusted to a different study.
+              </p>
+            ) : null}
+            {studies.length < 2 ? (
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                At least two studies are required for comparison.
+              </p>
+            ) : null}
+            {!hasComparableStudyPair && studies.length >= 2 ? (
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                Select two distinct studies to run the comparison.
+              </p>
+            ) : null}
+          </header>
 
-      </section>
-    </main>
+          <section className="space-y-2">
+            <h2 className="text-lg font-semibold">Side-by-Side Metrics</h2>
+            {studyMetricA && studyMetricB && comparisonDelta ? (
+              <div className="app-table-shell overflow-x-auto rounded-xl">
+                <table className="app-table min-w-full divide-y divide-slate-200/60 text-sm dark:divide-slate-700/60">
+                  <thead>
+                    <tr>
+                      <th className="px-3 py-2 text-left font-semibold">Metric</th>
+                      <th className="px-3 py-2 text-left font-semibold">
+                        Study A: {formatStudyHeaderLabel(studyMetricA.study)}
+                      </th>
+                      <th className="px-3 py-2 text-left font-semibold">
+                        Study B: {formatStudyHeaderLabel(studyMetricB.study)}
+                      </th>
+                      <th className="px-3 py-2 text-left font-semibold">Delta (A - B)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
+                    <tr>
+                      <td className="px-3 py-2">Study window</td>
+                      <td className="px-3 py-2 text-xs">{formatStudyWindow(studyMetricA.study)}</td>
+                      <td className="px-3 py-2 text-xs">{formatStudyWindow(studyMetricB.study)}</td>
+                      <td className="app-muted px-3 py-2">—</td>
+                    </tr>
+                    {metricComparisonRows.map((row) => (
+                      <tr key={row.metric}>
+                        <td className="px-3 py-2">{row.metric}</td>
+                        <td className="px-3 py-2">{row.valueA}</td>
+                        <td className="px-3 py-2">{row.valueB}</td>
+                        <td className="px-3 py-2">{row.delta}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="app-muted text-sm">
+                No comparison data available.
+              </p>
+            )}
+          </section>
+        </section>
+      </main>
+    </div>
   );
 }

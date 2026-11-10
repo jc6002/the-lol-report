@@ -182,7 +182,7 @@ export type CohortFlavorCell =
       ciHigh: number;
       deltaPp: number;
     }
-  | { status: "suppressed" }
+  | { status: "suppressed"; reason?: "below_k" | "complementary" }
   | { status: "empty" };
 
 export type DemographicCohortRow = {
@@ -209,6 +209,9 @@ export type DemographicQuestionMatrix = {
   questionText: string;
   surveyedRespondentCount: number;
   unsurveyedVoterCount: number;
+  studySurveyedVoterCount?: number;
+  coarsenVoterCounts?: boolean;
+  hideUnsurveyedCount?: boolean;
   visibleSegmentCount: number;
   maskedSegmentCount: number;
   rows: DemographicCohortRow[];
@@ -227,6 +230,7 @@ export type CohortTasteGapRow = {
   lowAnswerLabel: string;
   lowRate: number;
   lowVoters: number;
+  coarsenVoters?: boolean;
   spreadPp: number;
 };
 
@@ -534,9 +538,32 @@ export function computeSameImageMetrics({
     });
 
     const isEvaluatedShared = exposedRates.length >= 2;
-    const imageMeanRate = isEvaluatedShared
-      ? exposedRates.reduce((sum, val) => sum + val, 0) / exposedRates.length
-      : null;
+    const evaluatedCards = rawCards.filter(
+      (card): card is typeof card & { rate: number } => card.rate !== null,
+    );
+    const distinctEvaluatedFlavorKeys = new Set(
+      evaluatedCards.map((card) => card.flavorKey),
+    );
+    let imageMeanRate: number | null = null;
+    if (isEvaluatedShared) {
+      if (distinctEvaluatedFlavorKeys.size >= 2) {
+        const flavorSums = new Map<string, { sum: number; count: number }>();
+        for (const card of evaluatedCards) {
+          const entry = flavorSums.get(card.flavorKey) ?? { sum: 0, count: 0 };
+          entry.sum += card.rate;
+          entry.count += 1;
+          flavorSums.set(card.flavorKey, entry);
+        }
+        let sumOfFlavorMeans = 0;
+        for (const entry of flavorSums.values()) {
+          sumOfFlavorMeans += entry.sum / entry.count;
+        }
+        imageMeanRate = sumOfFlavorMeans / flavorSums.size;
+      } else {
+        imageMeanRate =
+          exposedRates.reduce((sum, val) => sum + val, 0) / exposedRates.length;
+      }
+    }
 
     let spreadPp: number | null = null;
     if (isEvaluatedShared && imageMeanRate !== null) {
@@ -547,13 +574,6 @@ export function computeSameImageMetrics({
       if (maxImageSpreadPp === null || spreadPp > maxImageSpreadPp) {
         maxImageSpreadPp = spreadPp;
       }
-
-      const evaluatedCards = rawCards.filter(
-        (card): card is typeof card & { rate: number } => card.rate !== null,
-      );
-      const distinctEvaluatedFlavorKeys = new Set(
-        evaluatedCards.map((card) => card.flavorKey),
-      );
 
       // Accumulate per-flavor same-image lift and pairwise W/L/T records strictly
       // when >= 2 distinct flavor buckets compete on the image; single-flavor
@@ -629,7 +649,19 @@ export function computeSameImageMetrics({
     });
   }
 
+  const hasReliableShowdownPair = (group: SameImageComparisonGroup): number => {
+    const solidCount = group.captions.filter(
+      (card) => card.rate !== null && card.exposures >= MIN_COHORT_VOTERS,
+    ).length;
+    return solidCount >= 2 ? 1 : 0;
+  };
+
   groups.sort((a, b) => {
+    const aReliable = hasReliableShowdownPair(a);
+    const bReliable = hasReliableShowdownPair(b);
+    if (aReliable !== bReliable) {
+      return bReliable - aReliable;
+    }
     const aSpread = a.spreadPp ?? -1;
     const bSpread = b.spreadPp ?? -1;
     if (aSpread !== bSpread) {
@@ -1584,9 +1616,171 @@ export function buildDemographicCohortMatrices({
       });
     }
 
-    // Compute largest segment taste gaps strictly across visible named answer rows.
+    const disclosedAnswerVoterSum = visibleRows.reduce(
+      (sum, row) => sum + (row.distinctVoters ?? 0),
+      0,
+    );
+    const pooledVoters = maskedPoolBucket.overall.voters.size;
+    const totalStudyVoters = studyVoters.size;
+    const skippedSurveyedVoters = Math.max(
+      0,
+      surveyedVoterCount - surveyedRespondentCount,
+    );
+    const showPooledVoters =
+      pooledVoters >= MIN_COHORT_VOTERS &&
+      !(
+        totalStudyVoters - (disclosedAnswerVoterSum + pooledVoters) > 0 &&
+        totalStudyVoters - (disclosedAnswerVoterSum + pooledVoters) <
+          MIN_COHORT_VOTERS
+      ) &&
+      !(
+        surveyedVoterCount >= MIN_COHORT_VOTERS &&
+        surveyedVoterCount - (disclosedAnswerVoterSum + pooledVoters) > 0 &&
+        surveyedVoterCount - (disclosedAnswerVoterSum + pooledVoters) <
+          MIN_COHORT_VOTERS
+      );
+    const disclosedSurveyedRowVoters =
+      disclosedAnswerVoterSum + (showPooledVoters ? pooledVoters : 0);
+    const coarsenVoterCounts =
+      (totalStudyVoters - disclosedSurveyedRowVoters > 0 &&
+        totalStudyVoters - disclosedSurveyedRowVoters < MIN_COHORT_VOTERS) ||
+      (surveyedVoterCount >= MIN_COHORT_VOTERS &&
+        surveyedVoterCount - disclosedSurveyedRowVoters > 0 &&
+        surveyedVoterCount - disclosedSurveyedRowVoters < MIN_COHORT_VOTERS);
+    const hideUnsurveyedCount =
+      (pooledVoters > 0 && pooledVoters < MIN_COHORT_VOTERS) ||
+      (skippedSurveyedVoters > 0 && skippedSurveyedVoters < MIN_COHORT_VOTERS) ||
+      (unsurveyedVoterCount > 0 && unsurveyedVoterCount < MIN_COHORT_VOTERS) ||
+      (totalStudyVoters - surveyedVoterCount > 0 &&
+        totalStudyVoters - surveyedVoterCount < MIN_COHORT_VOTERS) ||
+      coarsenVoterCounts ||
+      (pooledVoters >= MIN_COHORT_VOTERS && !showPooledVoters);
+
+    const finalRows: DemographicCohortRow[] = [...visibleRows];
+    if (maskedOptionCount > 0) {
+      finalRows.push({
+        rowKey: `q${question.id}-masked`,
+        rowKind: "masked_pool",
+        answerId: null,
+        label: "Small cohorts (n < 5)",
+        pooledOptionCount: maskedOptionCount,
+        // Omit pooled voter count when < 5 or when row-sum subtraction isolates 1..4 voters.
+        distinctVoters: showPooledVoters ? pooledVoters : null,
+        overallCell: finalizeCohortCell({
+          flavorKey: "__overall__",
+          accumulator: maskedPoolBucket.overall,
+          baselineRate: studyOverallRate,
+        }),
+        cellsByFlavorKey: buildRowCells(maskedPoolBucket),
+      });
+    }
+
+    if (unsurveyedVoterCount >= MIN_COHORT_VOTERS) {
+      finalRows.push({
+        rowKey: `q${question.id}-unsurveyed`,
+        rowKind: "unsurveyed",
+        answerId: null,
+        label: "No survey response on file",
+        pooledOptionCount: 0,
+        distinctVoters: unsurveyedVoterCount,
+        overallCell: finalizeCohortCell({
+          flavorKey: "__overall__",
+          accumulator: unsurveyedBucket.overall,
+          baselineRate: studyOverallRate,
+        }),
+        cellsByFlavorKey: buildRowCells(unsurveyedBucket),
+      });
+    }
+
+    // Apply secondary column suppression (preferring unsurveyed, then masked_pool, then smallest answer).
+    const rowMaskPriority = (kind: DemographicCohortRow["rowKind"]): number => {
+      if (kind === "unsurveyed") return 0;
+      if (kind === "masked_pool") return 1;
+      return 2;
+    };
+
+    const totalColumnVotersByKey = new Map<string, number>();
+    totalColumnVotersByKey.set("__overall__", studyVoters.size);
     for (const col of flavorColumns) {
-      const eligible = visibleRows
+      let colVoters =
+        (maskedPoolBucket.byFlavor.get(col.flavorKey)?.voters.size ?? 0) +
+        (unsurveyedBucket.byFlavor.get(col.flavorKey)?.voters.size ?? 0);
+      for (const row of visibleRows) {
+        if (row.answerId !== null) {
+          colVoters +=
+            answerBuckets.get(row.answerId)?.byFlavor.get(col.flavorKey)?.voters
+              .size ?? 0;
+        }
+      }
+      totalColumnVotersByKey.set(col.flavorKey, colVoters);
+    }
+
+    for (const [colKey, totalColVoters] of totalColumnVotersByKey.entries()) {
+      while (true) {
+        let disclosedColVoters = 0;
+        let victimIdx = -1;
+        let victimVoters = Number.POSITIVE_INFINITY;
+        let victimPriority = Number.POSITIVE_INFINITY;
+        let victimExposures = Number.POSITIVE_INFINITY;
+
+        for (let idx = 0; idx < finalRows.length; idx += 1) {
+          const row = finalRows[idx];
+          const cell =
+            colKey === "__overall__"
+              ? row.overallCell
+              : row.cellsByFlavorKey[colKey];
+          if (cell?.status !== "visible") {
+            continue;
+          }
+          disclosedColVoters += cell.distinctVoters;
+          const prio = rowMaskPriority(row.rowKind);
+          if (
+            prio < victimPriority ||
+            (prio === victimPriority && cell.distinctVoters < victimVoters) ||
+            (prio === victimPriority &&
+              cell.distinctVoters === victimVoters &&
+              cell.exposures < victimExposures)
+          ) {
+            victimIdx = idx;
+            victimVoters = cell.distinctVoters;
+            victimPriority = prio;
+            victimExposures = cell.exposures;
+          }
+        }
+
+        const hiddenColVoters = totalColVoters - disclosedColVoters;
+        if (
+          hiddenColVoters <= 0 ||
+          hiddenColVoters >= MIN_COHORT_VOTERS ||
+          victimIdx < 0
+        ) {
+          break;
+        }
+
+        const targetRow = finalRows[victimIdx];
+        if (colKey === "__overall__") {
+          finalRows[victimIdx] = {
+            ...targetRow,
+            overallCell: { status: "suppressed", reason: "complementary" },
+          };
+        } else {
+          finalRows[victimIdx] = {
+            ...targetRow,
+            cellsByFlavorKey: {
+              ...targetRow.cellsByFlavorKey,
+              [colKey]: { status: "suppressed", reason: "complementary" },
+            },
+          };
+        }
+      }
+    }
+
+    // Compute largest segment taste gaps strictly across visible named answer rows after complementary suppression.
+    const postSuppressionAnswerRows = finalRows.filter(
+      (row) => row.rowKind === "answer",
+    );
+    for (const col of flavorColumns) {
+      const eligible = postSuppressionAnswerRows
         .map((row) => ({
           label: row.label,
           cell: row.cellsByFlavorKey[col.flavorKey],
@@ -1626,58 +1820,32 @@ export function buildDemographicCohortMatrices({
           lowAnswerLabel: lowest.label,
           lowRate: lowest.cell.rate,
           lowVoters: lowest.cell.distinctVoters,
+          coarsenVoters: coarsenVoterCounts,
           spreadPp,
         });
       }
     }
 
-    const finalRows: DemographicCohortRow[] = [...visibleRows];
-    if (maskedOptionCount > 0) {
-      const pooledVoters = maskedPoolBucket.overall.voters.size;
-      finalRows.push({
-        rowKey: `q${question.id}-masked`,
-        rowKind: "masked_pool",
-        answerId: null,
-        label: "Masked small segments (n < 5)",
-        pooledOptionCount: maskedOptionCount,
-        // Never leak exact pooled voter count when the pooled row itself has < 5 voters.
-        distinctVoters: pooledVoters >= MIN_COHORT_VOTERS ? pooledVoters : null,
-        overallCell: finalizeCohortCell({
-          flavorKey: "__overall__",
-          accumulator: maskedPoolBucket.overall,
-          baselineRate: studyOverallRate,
-        }),
-        cellsByFlavorKey: buildRowCells(maskedPoolBucket),
-      });
-    }
-
-    if (unsurveyedVoterCount >= MIN_COHORT_VOTERS) {
-      finalRows.push({
-        rowKey: `q${question.id}-unsurveyed`,
-        rowKind: "unsurveyed",
-        answerId: null,
-        label: "No survey response on file",
-        pooledOptionCount: 0,
-        distinctVoters: unsurveyedVoterCount,
-        overallCell: finalizeCohortCell({
-          flavorKey: "__overall__",
-          accumulator: unsurveyedBucket.overall,
-          baselineRate: studyOverallRate,
-        }),
-        cellsByFlavorKey: buildRowCells(unsurveyedBucket),
-      });
-    }
-
-    totalVisibleSegments += visibleRows.length;
-    totalMaskedSegments += maskedOptionCount;
+    const postSuppressionVisibleCount = postSuppressionAnswerRows.filter(
+      (row) =>
+        row.overallCell.status === "visible" ||
+        Object.values(row.cellsByFlavorKey).some((c) => c.status === "visible"),
+    ).length;
+    totalVisibleSegments += postSuppressionVisibleCount;
+    totalMaskedSegments +=
+      maskedOptionCount + (visibleRows.length - postSuppressionVisibleCount);
 
     questionMatrices.push({
       questionId: question.id,
       questionText: question.question,
       surveyedRespondentCount,
       unsurveyedVoterCount,
-      visibleSegmentCount: visibleRows.length,
-      maskedSegmentCount: maskedOptionCount,
+      studySurveyedVoterCount: surveyedVoterCount,
+      coarsenVoterCounts,
+      hideUnsurveyedCount,
+      visibleSegmentCount: postSuppressionVisibleCount,
+      maskedSegmentCount:
+        maskedOptionCount + (visibleRows.length - postSuppressionVisibleCount),
       rows: finalRows,
     });
   }

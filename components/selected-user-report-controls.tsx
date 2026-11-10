@@ -69,6 +69,8 @@ export function SelectedUserReportControls({
   const searchInputId = useId();
   const modalTitleId = useId();
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const openTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
   const selectedUserIds = new Set(selectedUsers.map((user) => user.profile_id));
 
   const buildHref = (nextSelectedIds: string[]) => {
@@ -102,6 +104,9 @@ export function SelectedUserReportControls({
     setSearchResults([]);
     setSearchError(null);
     setIsSearching(false);
+    requestAnimationFrame(() => {
+      openTriggerRef.current?.focus({ preventScroll: true });
+    });
   };
 
   const openModal = () => {
@@ -163,14 +168,7 @@ export function SelectedUserReportControls({
   }, [isModalOpen]);
 
   useEffect(() => {
-    if (!isModalOpen) {
-      return;
-    }
-
-    if (deferredSearchQuery.length < 2) {
-      setSearchResults([]);
-      setSearchError(null);
-      setIsSearching(false);
+    if (!isModalOpen || deferredSearchQuery.length < 2) {
       return;
     }
 
@@ -233,11 +231,34 @@ export function SelectedUserReportControls({
           >
             <div className="flex min-h-full items-center justify-center">
               <section
+                ref={dialogRef}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby={modalTitleId}
                 className="app-card max-h-[80vh] w-full max-w-3xl overflow-hidden rounded-2xl"
                 onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => {
+                  if (event.key !== "Tab" || !dialogRef.current) {
+                    return;
+                  }
+                  const focusables = Array.from(
+                    dialogRef.current.querySelectorAll<HTMLElement>(
+                      'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+                    ),
+                  );
+                  if (focusables.length === 0) {
+                    return;
+                  }
+                  const first = focusables[0];
+                  const last = focusables[focusables.length - 1];
+                  if (event.shiftKey && document.activeElement === first) {
+                    event.preventDefault();
+                    last.focus();
+                  } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                  }
+                }}
               >
                 <div className="border-b border-slate-200/70 p-4 dark:border-slate-700/70">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -274,8 +295,7 @@ export function SelectedUserReportControls({
                   </label>
 
                   <p className="app-muted text-xs">
-                    Searches the <code>profiles</code> table. Users with no votes in this study
-                    can still be added and will appear with 0 votes.
+                    Users with no votes in this study can still be added and will appear with 0 votes.
                   </p>
 
                   <div className="max-h-[24rem] space-y-2 overflow-y-auto pr-1">
@@ -340,12 +360,12 @@ export function SelectedUserReportControls({
           <div className="space-y-1">
             <h2 className="text-lg font-semibold">Selected Users</h2>
             <p className="app-muted text-sm">
-              Use the modal to search the <code>profiles</code> table and add users to this
-              report.
+              Search participant profiles and add them to compare subset reception.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button
+              ref={openTriggerRef}
               type="button"
               onClick={openModal}
               disabled={isPending}

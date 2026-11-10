@@ -7,18 +7,17 @@ export async function TopNavbar() {
 
   try {
     const supabase = await createClient();
-    const [
-      {
-        data: { user: fetchedUser },
-      },
-      { count, error: countError },
-    ] = await Promise.all([
-      supabase.auth.getUser(),
-      supabase.from("studies").select("id", { count: "exact", head: true }),
-    ]);
+    const {
+      data: { user: fetchedUser },
+    } = await supabase.auth.getUser();
     user = fetchedUser;
-    if (!countError && typeof count === "number") {
-      studyCount = count;
+    if (fetchedUser) {
+      const { count, error: countError } = await supabase
+        .from("studies")
+        .select("id", { count: "exact", head: true });
+      if (!countError && typeof count === "number") {
+        studyCount = count;
+      }
     }
   } catch (error) {
     console.error(
